@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+    <config>
+        <!--<target>
+            <host>xxx.xxx.xxx.xxx</host>
+            <port>22</port>
+            <user></user>
+            <pass></pass>
+        </target>-->
+        <sourcebase></sourcebase>
+        <targetbase></targetbase>
+        <compare>date</compare>
+        <resync>1</resync>
+        <skip>*.svn,*.git,*.log</skip>
+    </config>
+    <jobs>
+        <job compare="size" resync="1">
+            <target><![CDATA[/var/www/syncd/tmp]]></target>
+            <source><![CDATA[/var/www/website/private]]></source>
+        </job>
+    </jobs>
+</root>
