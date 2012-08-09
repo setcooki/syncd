@@ -1,4 +1,14 @@
 <?php
+
+/**
+ * TODO: make a real is writeable test in test modus
+ * TODO: make ftp client
+ * TODO: follow symbolic links
+ * TODO: rework/improve sftp:exec
+ * TODO: ssh user on shared server must not have full path in all action in target path. define xml node to use target root path or not
+ * TODO: copy file must be a stream write procedure since copy/fopen are asyncron operations and there is no way of determining the eof event to set chmod after file has been copied
+ */
+
 /**
  * @desc
  * linux/unix directory staging/sync script for php cli
@@ -138,25 +148,12 @@
  * - filename + extension (will exclude all files of the same name in all directories of job source path!)
  * - path + filename # extension will exclude a specific file from job source path (defined relative or absolute)
  *
- *
  * @author setcookie <set@cooki.me>
  * @link set.cooki.me
  * @copyright Copyright &copy; 2011-2012 setcookie
  * @license http://www.gnu.org/copyleft/gpl.html
- * @version 0.0.3
- */
-
-/**
- * TODO: make a real is writeable test in test modus
- * TODO: make ftp client
- * TODO: follow symbolic links
- * TODO: rework sftp:exec
- * TODO: ssh user on shared server must not have full path in all action in target path. define xml node to use target root path or not
- * TODO: copy file must be a stream write procedure since copy/fopen are asyncron operations and there is no way of determining the eof event to set chmod after file has been copied
- * TODO: complete chown/chgrp for sftp protocol
- */
-
-/**
+ * @package syncd
+ * @version 0.0.4
  * @desc base class for sync
  * @throws Exception
  */
@@ -315,7 +312,7 @@ class Syncd
                 );
                 $this->_conn->connect();
             }else{
-                $this->_conn = new Cp($this);
+                $this->_conn = new Fs($this);
             }
         }
     }
@@ -506,7 +503,6 @@ class Syncd
             //iterate to source directories and sync
             foreach($iterator as $i)
             {
-                @clearstatcache();
                 $source_absolute_path   = ($i->isDir()) ? rtrim($i->__toString(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR : $i->__toString();
                 $source_relative_path   = DIRECTORY_SEPARATOR . trim(str_replace($source, "", $source_absolute_path), DIRECTORY_SEPARATOR);
                 $target_absolute_path   = $target . trim($source_relative_path, DIRECTORY_SEPARATOR);
@@ -732,7 +728,6 @@ class Syncd
         }
         if($this->_conn->hasError())
         {
-            //$this->log($this->_conn->getError(), self::LOG_ERROR);
             $this->log("sync complete with errors: " .$this->_conn->countError(), self::LOG_NOTICE);
             if($this->_mode === self::MODE_TEST)
             {
@@ -1002,19 +997,71 @@ class Syncd
     }
 }
 
-
+/**
+* @author setcookie <set@cooki.me>
+* @link set.cooki.me
+* @copyright Copyright &copy; 2011-2012 setcookie
+* @license http://www.gnu.org/copyleft/gpl.html
+* @package syncd
+* @since 0.0.1
+* @desc abstract file transfer class serves as base class for all protocol dependend sub classes/adapters
+*/
 abstract class Ft
 {
+    /**
+     * set with the connection resource handler depending on protocol implementation
+     * @var resource $_conn
+     */
     protected $_conn = null;
+
+    /**
+     * contains the host name/url/ip according to protocol
+     * @var string $_host
+     */
     protected $_host = null;
+
+    /**
+     * contains the port number according to protocol
+     * @var int $_port
+     */
     protected $_port = null;
+
+    /**
+     * contains the user name if authentication is done by user/pass
+     * @var string $_user
+     */
     protected $_user = null;
+
+    /**
+     * contains the password if authentication is done by user/pass
+     * @var string $_pass
+     */
     protected $_pass = null;
+
+    /**
+     * contains all errors in form of error pool
+     * @var array $_err
+     */
     protected $_err = array();
+
+    /**
+     * contains syncd class instance so protocol adapter can be embeded in workflow
+     * @var null|Syncd $_syncd
+     */
     protected $_syncd = null;
+
+    /**
+     * contains current working directory accoring to adapter
+     * @var string $_cwd
+     */
     protected $_cwd = "";
 
 
+    /**
+     * @desc initializes base class
+     * @param null|Syncd $syncd expects the syncd instance as parent workflow container
+     * @public
+     */
     public function __construct(Syncd $syncd = null)
     {
         if($syncd !== null)
@@ -1024,25 +1071,30 @@ abstract class Ft
             throw new Exception("syncd instance must be passed in first parameter");
         }
     }
+
     /**
-     * @param null $host
-     * @param int $port
-     * @param null $user
-     * @param null $pass
+     * @desc init default method setting connection settings only used in s(ftp) protocols
+     * @param string $host (mandatory) expects the host name string
+     * @param int $port (optional) expects the port to connect to host
+     * @param string $user (mandatory) expects the user name for authentication
+     * @param string $pass (mandatory) expects the password for authentication
+     * @public
+     * @return void
      */
     public function init($host = null, $port = 22, $user = null, $pass = null)
     {
         if($host !== null && $user !== null && $pass !== null)
         {
-            $this->_host = trim($host);
+            $this->_host = trim((string)$host);
             $this->_port = (int)$port;
-            $this->_user = trim($user);
-            $this->_pass = trim($pass);
+            $this->_user = trim((string)$user);
+            $this->_pass = trim((string)$pass);
         }
     }
 
-
     /**
+     * @desc return boolean value if error has occured or not
+     * @public
      * @return bool
      */
     public function hasError()
@@ -1051,6 +1103,8 @@ abstract class Ft
     }
 
     /**
+     * @desc returns error pool containing all errors as array
+     * @public
      * @return array
      */
     public function getError()
@@ -1059,6 +1113,8 @@ abstract class Ft
     }
 
     /**
+     * @desc returns the error count - number of total errors
+     * @public
      * @return int
      */
     public function countError()
@@ -1067,7 +1123,9 @@ abstract class Ft
     }
 
     /**
-     * @param null $err
+     * @desc log error to console via syncd instance passed in class constructor
+     * @param string $err expects error string
+     * @protected
      * @return void
      */
     protected function error($err = null)
@@ -1101,7 +1159,15 @@ abstract class Ft
     abstract public function isGrp($group = null);
 }
 
-
+/**
+* @author setcookie <set@cooki.me>
+* @link set.cooki.me
+* @copyright Copyright &copy; 2011-2012 setcookie
+* @license http://www.gnu.org/copyleft/gpl.html
+* @package syncd
+* @since 0.0.1
+* @desc concrete implementation of ftp protocol
+*/
 class Ftp extends Ft
 {
     public function connect(){}
@@ -1123,7 +1189,15 @@ class Ftp extends Ft
     public function isGrp($group = null){}
 }
 
-
+/**
+* @author setcookie <set@cooki.me>
+* @link set.cooki.me
+* @copyright Copyright &copy; 2011-2012 setcookie
+* @license http://www.gnu.org/copyleft/gpl.html
+* @package syncd
+* @since 0.0.1
+* @desc concrete implementation of sftp protocol
+*/
 class Sftp extends Ft
 {
     protected $_sftp = null;
@@ -1146,14 +1220,6 @@ class Sftp extends Ft
         {
             throw new Exception('unable to obtain sftp connection');
         }
-        /*if(($stream = ssh2_exec($this->_conn, "pwd")) !== false)
-        {
-            @stream_set_blocking($stream, true);
-            $this->_cwd = trim(stream_get_contents($stream));
-            @fclose($stream);
-        }else{
-            throw new Exception("unable to obtain current working directory from stream");
-        }*/
     }
 
 
@@ -1166,7 +1232,7 @@ class Sftp extends Ft
     {
         if($cwd !== null)
         {
-            $this->_cwd = trim($cwd);
+            $this->_cwd = trim((string)$cwd);
         }else{
             if($this->_cwd === "")
             {
@@ -1193,7 +1259,7 @@ class Sftp extends Ft
         $return = false;
         if($this->isDir($dir))
         {
-            $file = "ssh2.sftp://".$this->_sftp . rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($dir, DIRECTORY_SEPARATOR) . ".tmp";
+            $file = "ssh2.sftp://".$this->_sftp . rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR) . ".tmp";
             if((bool)@file_put_contents($file, " "))
             {
                 @unlink($file);
@@ -1214,7 +1280,7 @@ class Sftp extends Ft
         $return = false;
         if($dir !== null)
         {
-            $dir = "ssh2.sftp://".$this->_sftp . rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($dir, DIRECTORY_SEPARATOR);
+            $dir = "ssh2.sftp://".$this->_sftp . rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR);
             if(is_dir($dir))
             {
                 $return = true;
@@ -1233,7 +1299,7 @@ class Sftp extends Ft
         $return = false;
         if($file !== null)
         {
-            $file = "ssh2.sftp://".$this->_sftp . rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($file, DIRECTORY_SEPARATOR);
+            $file = "ssh2.sftp://".$this->_sftp . rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
             if(is_file($file))
             {
                 $return = true;
@@ -1253,8 +1319,8 @@ class Sftp extends Ft
         if($file !== null)
         {
             $t = 0;
-            $file = "ssh2.sftp://".$this->_sftp . rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($file, DIRECTORY_SEPARATOR);
-            $m = strtolower(trim($m));
+            $file = "ssh2.sftp://".$this->_sftp . rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
+            $m = strtolower(trim((string)$m));
             switch($m)
             {
                 case "a":
@@ -1286,7 +1352,7 @@ class Sftp extends Ft
         if($file !== null)
         {
             $s = 0;
-            $file = "ssh2.sftp://".$this->_sftp . rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($file, DIRECTORY_SEPARATOR);
+            $file = "ssh2.sftp://".$this->_sftp . rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
             if(($s = filesize($file)) !== false)
             {
                 return (int)$s;
@@ -1311,9 +1377,9 @@ class Sftp extends Ft
         if($source !== null && $target !== null)
         {
             if($this->_cwd === "/"){
-                $target = ltrim(rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($target, DIRECTORY_SEPARATOR), DIRECTORY_SEPARATOR);
+                $target = $this->_cwd . ltrim((string)$target, DIRECTORY_SEPARATOR);
             }else{
-                $target = rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($target, DIRECTORY_SEPARATOR);
+                $target = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$target, DIRECTORY_SEPARATOR);
             }
             if($mode !== null)
             {
@@ -1330,12 +1396,88 @@ class Sftp extends Ft
         return $return;
     }
 
+    /**
+     * @param null $file
+     * @param null $user
+     * @return bool
+     */
+    public function chOwn($file = null, $user = null)
+    {
+        if($file !== null && $user !== null)
+        {
+            if($this->_cwd === "/"){
+                $file = $this->_cwd . ltrim((string)$file, DIRECTORY_SEPARATOR);
+            }else{
+                $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
+            }
+            $return = $this->exec("sudo chown ".trim((string)$user)." $file");
+            if(empty($return))
+            {
+                return true;
+            }else{
+                $this->error("unable to chown file: $file to: $user");
+            }
+        }
+        return false;
+    }
 
-    public function chOwn($file = null, $user = null){}
-    public function chGrp($file = null, $group = null){}
-    public function isOwn($user = null){}
-    public function isGrp($group = null){}
+    /**
+     * @param null $file
+     * @param null $group
+     */
+    public function chGrp($file = null, $group = null)
+    {
+        if($file !== null && $group !== null)
+        {
+            if($this->_cwd === "/"){
+                $file = $this->_cwd . ltrim((string)$file, DIRECTORY_SEPARATOR);
+            }else{
+                $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
+            }
+            $return = $this->exec("sudo chgrp ".trim((string)$group)." $file");
+            if(empty($return))
+            {
+                return true;
+            }else{
+                $this->error("unable to chgrp file: $file to: $group");
+            }
+        }
+        return false;
+    }
 
+    /**
+     * @param null $user
+     * @return bool
+     */
+    public function isOwn($user = null)
+    {
+        if($user !== null)
+        {
+            $return = $this->exec("sudo grep ".trim((string)$user)." /etc/passwd");
+            if(!empty($return))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @param null $group
+     * @return bool
+     */
+    public function isGrp($group = null)
+    {
+        if($group !== null)
+        {
+            $return = $this->exec("sudo grep ".trim((string)$group)." /etc/group");
+            if(!empty($return))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
 
     /**
      * @param null $dir
@@ -1347,7 +1489,7 @@ class Sftp extends Ft
         $return = false;
         if($dir !== null)
         {
-            $dir = "ssh2.sftp://".$this->_sftp . rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($dir, DIRECTORY_SEPARATOR);
+            $dir = "ssh2.sftp://".$this->_sftp . rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR);
             if(@mkdir($dir, $mode))
             {
                 $return = true;
@@ -1396,8 +1538,8 @@ class Sftp extends Ft
                 return array_reverse($tmp);
             }
 
-            $base = "ssh2.sftp://".$this->_sftp . rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
-            $dir = ltrim($dir, DIRECTORY_SEPARATOR);
+            $base = "ssh2.sftp://".$this->_sftp . rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+            $dir = ltrim((string)$dir, DIRECTORY_SEPARATOR);
 
             if(($ls = _lsDir($base, $dir)) !== false)
             {
@@ -1417,7 +1559,7 @@ class Sftp extends Ft
     {
         if($dir !== null)
         {
-            $dir = "ssh2.sftp://".$this->_sftp . rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($dir, DIRECTORY_SEPARATOR);
+            $dir = "ssh2.sftp://".$this->_sftp . rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR);
 
             function _rmDir($d = null, &$e)
             {
@@ -1469,10 +1611,10 @@ class Sftp extends Ft
     {
         if($file !== null)
         {
-            $_file = "ssh2.sftp://".$this->_sftp . rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($file, DIRECTORY_SEPARATOR);
+            $_file = "ssh2.sftp://".$this->_sftp . rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
             if(!@unlink($_file))
             {
-                if($this->exec("chmod 0777 ". DIRECTORY_SEPARATOR . ltrim($file, DIRECTORY_SEPARATOR)) && @unlink($_file))
+                if($this->exec("chmod 0777 ". DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR)) && @unlink($_file))
                 {
                     return true;
                 }
@@ -1492,7 +1634,7 @@ class Sftp extends Ft
     {
         if($file !== null)
         {
-            $file = "ssh2.sftp://".$this->_sftp . rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($file, DIRECTORY_SEPARATOR);
+            $file = "ssh2.sftp://".$this->_sftp . rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
             if(($type = @filetype($file)) !== false)
             {
                 return strtolower($type);
@@ -1514,7 +1656,7 @@ class Sftp extends Ft
 
         if($cmd !== null)
         {
-            if(($stream = ssh2_exec($this->_conn, escapeshellcmd($cmd), false)) !== false)
+            if(($stream = ssh2_exec($this->_conn, escapeshellcmd((string)$cmd), false)) !== false)
             {
                 stream_set_blocking($stream, true);
                 $err_stream = ssh2_fetch_stream($stream, SSH2_STREAM_STDERR);
@@ -1538,7 +1680,16 @@ class Sftp extends Ft
     }
 }
 
-class Cp extends FT
+/**
+* @author setcookie <set@cooki.me>
+* @link set.cooki.me
+* @copyright Copyright &copy; 2011-2012 setcookie
+* @license http://www.gnu.org/copyleft/gpl.html
+* @package syncd
+* @since 0.0.3
+* @desc concrete implementation of local to local filesystem operations
+*/
+class Fs extends FT
 {
     /**
      *
@@ -1554,7 +1705,7 @@ class Cp extends FT
     {
         if($cwd !== null)
         {
-            $this->_cwd = trim($cwd);
+            $this->_cwd = trim((string)$cwd);
         }
         return $this->_cwd;
     }
@@ -1568,7 +1719,7 @@ class Cp extends FT
         $return = false;
         if($this->isDir($dir))
         {
-            $file = rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . rtrim($dir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ".tmp";
+            $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . rtrim((string)$dir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ".tmp";
             if((bool)@file_put_contents($file, " "))
             {
                 @unlink($file);
@@ -1586,7 +1737,7 @@ class Cp extends FT
     public function isDir($dir = null)
     {
         $return = false;
-        $dir = rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($dir, DIRECTORY_SEPARATOR);
+        $dir = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR);
         if($dir !== null)
         {
             if(is_dir($dir))
@@ -1605,7 +1756,7 @@ class Cp extends FT
     public function isFile($file = null)
     {
         $return = false;
-        $file = rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($file, DIRECTORY_SEPARATOR);
+        $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
         if($file !== null)
         {
             if(is_file($file))
@@ -1627,8 +1778,8 @@ class Cp extends FT
         if($file !== null)
         {
             $t = 0;
-            $m = strtolower(trim($m));
-            $file = rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($file, DIRECTORY_SEPARATOR);
+            $m = strtolower(trim((string)$m));
+            $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
             switch($m)
             {
                 case "a":
@@ -1660,7 +1811,7 @@ class Cp extends FT
         if($file !== null)
         {
             $s = 0;
-            $file = rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($file, DIRECTORY_SEPARATOR);
+            $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
             if(($s = filesize($file)) !== false)
             {
                 return (int)$s;
@@ -1685,9 +1836,9 @@ class Cp extends FT
         if($source !== null && $target !== null)
         {
             if($this->_cwd === "/"){
-                $target = ltrim(rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($target, DIRECTORY_SEPARATOR), DIRECTORY_SEPARATOR);
+                $target = $this->_cwd . DIRECTORY_SEPARATOR . ltrim((string)$target, DIRECTORY_SEPARATOR);
             }else{
-                $target = rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($target, DIRECTORY_SEPARATOR);
+                $target = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$target, DIRECTORY_SEPARATOR);
             }
             $return = @copy($source, $target);
             if($return)
@@ -1713,7 +1864,6 @@ class Cp extends FT
         return $return;
     }
 
-
     /**
      * @param null $file
      * @param null $user
@@ -1726,9 +1876,9 @@ class Cp extends FT
         if($file !== null && $user !== null)
         {
             if($this->_cwd === "/"){
-                $file = ltrim(rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($file, DIRECTORY_SEPARATOR), DIRECTORY_SEPARATOR);
+                $file = $this->_cwd . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
             }else{
-                $file = rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($file, DIRECTORY_SEPARATOR);
+                $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
             }
             $return = @chown($file, (string)$user);
             if(!$return)
@@ -1739,7 +1889,6 @@ class Cp extends FT
         @clearstatcache();
         return $return;
     }
-
 
     /**
      * @param null $file
@@ -1753,9 +1902,9 @@ class Cp extends FT
         if($file !== null && $group !== null)
         {
             if($this->_cwd === "/"){
-                $file = ltrim(rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($file, DIRECTORY_SEPARATOR), DIRECTORY_SEPARATOR);
+                $file = $this->_cwd . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
             }else{
-                $file = rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($file, DIRECTORY_SEPARATOR);
+                $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
             }
             $return = @chgrp($file, (string)$group);
             if(!$return)
@@ -1766,7 +1915,6 @@ class Cp extends FT
         @clearstatcache();
         return $return;
     }
-
 
     /**
      * @param null $user
@@ -1781,7 +1929,6 @@ class Cp extends FT
         return false;
     }
 
-
     /**
      * @param null $group
      * @return bool
@@ -1795,7 +1942,6 @@ class Cp extends FT
         return false;
     }
 
-
     /**
      * @param null $dir
      * @param int $mode
@@ -1807,7 +1953,7 @@ class Cp extends FT
         $return = false;
         if($dir !== null)
         {
-            $dir = rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($dir, DIRECTORY_SEPARATOR);
+            $dir = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR);
             $mask = @umask(0);
             if(@mkdir($dir, $mode))
             {
@@ -1858,8 +2004,8 @@ class Cp extends FT
                 return array_reverse($tmp);
             }
 
-            $base = rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
-            $dir = ltrim($dir, DIRECTORY_SEPARATOR);
+            $base = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+            $dir = ltrim((string)$dir, DIRECTORY_SEPARATOR);
 
             if(($ls = _lsDir($base, $dir)) !== false)
             {
@@ -1881,7 +2027,7 @@ class Cp extends FT
 
         if($dir !== null)
         {
-            $dir = rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($dir, DIRECTORY_SEPARATOR);
+            $dir = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR);
 
             function _rmDir($d = null, &$e)
             {
@@ -1934,7 +2080,7 @@ class Cp extends FT
     {
         if($file !== null)
         {
-            $_file = rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($file, DIRECTORY_SEPARATOR);
+            $_file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
             if(!@unlink($_file))
             {
                 if(chmod(DIRECTORY_SEPARATOR . ltrim($file, DIRECTORY_SEPARATOR), 0777) && @unlink($_file))
@@ -1957,7 +2103,7 @@ class Cp extends FT
     {
         if($file !== null)
         {
-            $file = rtrim($this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($file, DIRECTORY_SEPARATOR);
+            $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
             if(($type = @filetype($file)) !== false)
             {
                 return strtolower($type);
@@ -1971,7 +2117,7 @@ class Cp extends FT
 
 /*************************************************************************************
  *
- * run script
+ * run script via cli
  * 
 *************************************************************************************/
 if((int)$argc >= 2)
