@@ -153,7 +153,7 @@
  * @copyright Copyright &copy; 2011-2012 setcookie
  * @license http://www.gnu.org/copyleft/gpl.html
  * @package syncd
- * @version 0.0.4
+ * @version 0.0.5
  * @desc base class for sync
  * @throws Exception
  */
