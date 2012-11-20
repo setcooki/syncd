@@ -25,15 +25,15 @@
  * - bash:~$ php -f /path/to/syncd.php "/var/www/tmp/config.xml" "live"
  *
  * the first mandatory argument expects the path to the config xml file. path must be absolute or filename only if config.xml resides in same
- * directory as the script.
- * the second mandatory argument expects the run modus as explained here:
+ * directory as the script. the second mandatory argument expects the run modus as explained here:
  *
  * - "test"(default)  = simulates sync testing the basic requirements for a successful sync echoing everything in the shell
  * - "logged" = does the same as "test" with logging everything to a log report file
  * - "live" = executes the jobs defined in the config xml and also will write the report log file
  *
- * NOTE: the directory in which this script resides must be writeable in order to write the log report
+ * NOTE: the directory in which this script resides must be writeable in order to write the log report if the config.logdir value is not set
  * NOTE: the script currently supports only sftp with ssh2 and normal user/pass authentification!
+ * NOTE: when defining job type and date attributes a history log file in the same directory or the config.logdir as the script named "jobs.log" will be created to log when jobs are executed
  *
  * The following displays are complete config xml file:
  *
@@ -55,9 +55,10 @@
         <chmod>0755</chmod>
         <chown>www-data</chown>
         <chgrp>www-data</chgrp>
+        <logdir>/logs</logdir>
     </config>
     <jobs>
-        <job compare="size" resync="1">
+        <job id="job1" compare="size" resync="1" type="daily" date="00:00">
             <target><![CDATA[/backup]]></target>
             <source><![CDATA[/var/www/website/private]]></source>
             <excludes>
@@ -121,7 +122,29 @@
  * expects a group name as string to set after copy of file/dir has been successful. the group will be tested before sync to check if group does exist on target server.
  * the new group name will only be set if the to be copied source file/dir does have a different user as owner
  *
- * The following parameters can be defined in job node as attribute to overwrite global values:
+ * 14) config.logdir (optional)
+ * expects absolute or relative path to log file directory, the directory where log files are written to. relative must be from the location of base syncd.php file.
+ *
+ * The following parameters must/can be defined in job nodes as attribute:
+ *
+ * 1) id
+ * 2) type
+ * 3) date
+ *
+ * 1) job.id (optional)
+ * defines a job id for cron automated syncing as well as defining a job as reference for future implementation. if not set will be filled with numeric index starting for 0 for first job.
+ * NOTE: that if changing the id and when automating scripts the reference to the job history will be lost resulting in wrong cron/automatization behaviour. delete jobs.log file after changing!
+ *
+ * 2) job.type (optional)
+ * defines the type of job when running under automated scripts. the values can be (once, daily). in "once" modus the job will be executed only once (see job.date for date attribute) since its job timestamp will be logged to
+ * prevent calling of job more then once. in "daily" modus the job will be executed only once daily at a defined hour (see job.date attribute)
+ *
+ * 3) job.date (mandatory if job.type is set)
+ * defines the date on when the job is supposed to be executed according to attribute job.type.
+ * "once" = accepts a valid php strtotime value, see http://php.net/manual/en/datetime.formats.php
+ * "daily" = expects a hourly value like "14:00", "09:30"
+ *
+ * The following parameters can be defined in job nodes as attribute to overwrite global values:
  *
  * 1) compare
  * 2) resync
@@ -141,7 +164,7 @@
  * 2) job.target (mandatory)
  * defines the target path on remote server where to sync files from source -> target. The path must be absolute if target basepath is not set.
  *
- * 3) excludes (optional)
+ * 3) job.excludes (optional)
  * defines the exclude rules which can be:
  * - absolute path in source
  * - relative path to job source dir
@@ -153,7 +176,7 @@
  * @copyright Copyright &copy; 2011-2012 setcookie
  * @license http://www.gnu.org/copyleft/gpl.html
  * @package syncd
- * @version 0.0.5
+ * @version 0.0.6
  * @desc base class for sync
  * @throws Exception
  */
@@ -166,12 +189,16 @@ class Syncd
     const LOG_SUCCESS           = "success";
     const LOG_ERROR             = "error";
     protected                   $_xml = null;
+    protected                   $_dir = null;
     protected                   $_mode = null;
     protected                   $_xmlArray = null;
     protected                   $_conn = null;
     protected                   $_log = array();
     protected                   $_err = 0;
+    protected                   $_logDir = null;
     protected                   $_logFile = null;
+    protected                   $_jobFile = null;
+    protected                   $_jobPool = null;
     protected static            $_instance = null;
 
 
@@ -214,15 +241,16 @@ class Syncd
             {
                 throw new Exception("system does not support recursive iterators");
             }
-            if(stristr($xml, DIRECTORY_SEPARATOR) === false)
+            if(!class_exists('DOMDocument', false))
             {
-                $this->_xml = $xml = rtrim(realpath(dirname(__FILE__)), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $xml;
+                throw new Exception("system does not support dom");
+            }
+            if(stristr($xml, DIRECTORY_SEPARATOR) === false || (substr($xml, 0, 1) === DIRECTORY_SEPARATOR &&  substr_count($xml, DIRECTORY_SEPARATOR) === 1))
+            {
+                $this->_xml = $xml = rtrim(realpath(dirname(__FILE__)), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($xml, DIRECTORY_SEPARATOR);
             }else{
                 $this->_xml = $xml;
             }
-
-            $this->_logFile = realpath(dirname(__FILE__)) . DIRECTORY_SEPARATOR . basename($this->_xml, ".xml") . "-". strftime("%d%m%y-%H%I%S", time()) . ".report.log";
-
             if(($dom = DOMDocument::load($this->_xml, LIBXML_NOBLANKS | LIBXML_NOCDATA)) !== false)
             {
                 $this->_xmlArray = array_shift($this->xmlToArray($dom));
@@ -253,62 +281,214 @@ class Syncd
 
 
     /**
+     * @desc init bootloader
+     * @access protected
+     * @throws Exception
+     */
+    protected function init()
+    {
+        $tmp = array();
+
+        $xml =& $this->_xmlArray;
+
+        if(isset($xml['config']['logdir']))
+        {
+            if(stristr($xml['config']['logdir'], DIRECTORY_SEPARATOR) === false || (substr($xml['config']['logdir'], 0, 1) === DIRECTORY_SEPARATOR &&  substr_count($xml['config']['logdir'], DIRECTORY_SEPARATOR) === 1))
+            {
+                $this->_logDir = $xml['config']['logdir'] = rtrim(realpath(dirname(__FILE__)), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($xml['config']['logdir'], DIRECTORY_SEPARATOR);
+            }else{
+                $this->_logDir = $xml['config']['logdir'];
+            }
+            $this->_logDir = $this->_logDir . DIRECTORY_SEPARATOR;
+            if(!is_dir($this->_logDir) || !is_writable($this->_logDir))
+            {
+                throw new Exception("config.logdir log directory does not exist or is not writeable");
+            }
+        }else{
+            $this->_logDir = rtrim(realpath(dirname($this->_xml)), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+            if(!is_dir($this->_logDir) || !is_writable($this->_logDir))
+            {
+                throw new Exception("config.logdir log directory does not exist or is not writeable");
+            }
+        }
+
+        $this->_jobFile = $this->_logDir . 'jobs.log';
+        $this->_logFile = $this->_logDir . basename($this->_xml, ".xml") . "-". strftime("%d%m%y-%H%I%S", time()) . ".report.log";
+
+        if(is_file($this->_jobFile))
+        {
+            if(($this->_jobPool = file($this->_jobFile, FILE_SKIP_EMPTY_LINES)) !== false)
+            {
+                foreach($this->_jobPool as $k => $v)
+                {
+                    $t = explode(",", $v);
+                    if(!array_key_exists($t[0], $tmp))
+                    {
+                        $tmp[$t[0]] = array();
+                    }
+                    if(!array_key_exists($t[1], $tmp[$t[0]]))
+                    {
+                        $tmp[$t[0]][$t[1]] = array();
+                    }
+                    $tmp[$t[0]][$t[1]][] = $t[2];
+                }
+                $this->_jobPool = $tmp;
+            }else{
+                throw new Exception("job.log file could not be opened");
+            }
+        }
+        if($this->_mode === self::MODE_LIVE)
+        {
+            $this->initJobs();
+        }
+        $this->initConfig();
+    }
+
+
+    /**
+     * @desc validates and inits the job entries
+     * @throws Exception
+     * @return void
+     */
+    protected function initJobs()
+    {
+        $tmp = array();
+        $xml =& $this->_xmlArray;
+
+        if(isset($xml['jobs']) && !empty($xml['jobs']))
+        {
+            if(!isset($xml['jobs'][0]))
+            {
+                $xml['jobs']['job'] = array($xml['jobs']['job']);
+            }
+            $j = 0;
+            foreach($xml['jobs']['job'] as $k => &$v)
+            {
+                if(!$this->is("jobs.job.$j.#attrs.id"))
+                {
+                    $v['#attrs']['id'] = $j;
+                }
+                if($this->is("jobs.job.$j.#attrs.date"))
+                {
+                    if($this->is("jobs.job.$j.#attrs.type"))
+                    {
+                        $type = strtolower(trim($this->get("jobs.job.$j.#attrs.type")));
+                    }else{
+                        $type = $v['#attrs']['type'] = 'once';
+                    }
+                    $date = trim($this->get("jobs.job.$j.#attrs.date"));
+                    $id = trim($this->get("jobs.job.$j.#attrs.id"));
+
+                    if(!in_array($type, array('once', 'daily')))
+                    {
+                        throw new Exception("config file must define a supported attribute value for config.jobs.job.#attrs.type");
+                    }
+                    if(empty($date))
+                    {
+                        throw new Exception("config file must define a supported attribute value for config.jobs.job.#attrs.date");
+                    }
+                    if(strlen($id) < 1)
+                    {
+                        throw new Exception("config file must define a supported attribute value for config.jobs.job.#attrs.id");
+                    }
+                    switch($type)
+                    {
+                        case 'once':
+                            if(($date = strtotime($date)) !== false)
+                            {
+                                if(time() >= $date)
+                                {
+                                    if($this->_jobPool !== null && isset($this->_jobPool[basename($this->_xml)][$id]))
+                                    {
+                                        $v = null;
+                                    }
+                                }else{
+                                    $v = null;
+                                }
+                            }else{
+                                throw new Exception("job attribute value for config.jobs.job.#attrs.date is not a valid date value");
+                            }
+                            break;
+                        case 'daily':
+                            if((bool)preg_match('/([0-9]{1,2})\:([0-9]{1,2})$/i', $date, $m) !== false)
+                            {
+                                if(time() < mktime((int)$m[1], (int)$m[2], (int)strftime('%S', time()), (int)strftime('%m', time()), (int)strftime('%d', time()), (int)strftime('%Y', time())))
+                                {
+                                    $v = null;
+                                }
+                                if($this->_jobPool !== null && isset($this->_jobPool[basename($this->_xml)][$id]))
+                                {
+                                    $time = (int)trim($this->_jobPool[basename($this->_xml)][$id][sizeof($this->_jobPool[basename($this->_xml)][$id]) - 1]);
+                                    if(time() > mktime((int)strftime('%H', $time), (int)strftime('%M', $time), (int)strftime('%S', $time), (int)strftime('%m', time()), (int)strftime('%d', time()), (int)strftime('%Y', time())))
+                                    {
+                                        $v = null;
+                                    }
+                                }
+                            }else{
+                                throw new Exception("job attribute value for config.jobs.job.#attrs.date is not a valid hourly value");
+                            }
+                            break;
+                        default:
+                    }
+                }
+                $j++;
+            }
+        }else{
+            throw new Exception("config file must have at least one valid job entry");
+        }
+    }
+
+
+    /**
      * @desc init method validates xml config and inits remote connection
      * @throws Exception
      * @return void
      */
-    protected function init()
+    protected function initConfig()
     {
         if($this->_xmlArray !== null)
         {
-            $xml =& $this->_xmlArray['config'];
+            $xml =& $this->_xmlArray;
 
-            if(isset($xml['target']))
+            if(isset($xml['config']['target']))
             {
-                if(!isset($xml['target']['host']))
+                if(!isset($xml['config']['target']['host']))
                 {
                     throw new Exception("config file must define config.target.host");
                 }
-                if(!isset($xml['target']['port']))
+                if(!isset($xml['config']['target']['port']))
                 {
                     throw new Exception("config file must define config.target.port");
                 }
-                if(!isset($xml['target']['user']))
+                if(!isset($xml['config']['target']['user']))
                 {
                     throw new Exception("config file must define config.target.user");
                 }
-                if(!isset($xml['target']['pass']) || empty($xml['target']['pass']))
+                if(!isset($xml['config']['target']['pass']) || empty($xml['config']['target']['pass']))
                 {
                     echo "Password for target: ";
                     @system('stty -echo');
                     $pass = trim(fgets(STDIN));
                     if(!empty($pass))
                     {
-                        $xml['target']['pass'] = $pass;
+                        $xml['config']['target']['pass'] = $pass;
                     }else{
                         die("Please run script again an enter correct password");
                         exit(0);
                     }
                 }
             }
-            $tmp = rtrim(realpath(dirname($this->_xml)), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
-            if((bool)@file_put_contents($tmp . ".tmp", " "))
-            {
-                @unlink($tmp . ".tmp");
-            }else{
-                throw new Exception("config dir: $tmp must be writeable in order to write log report");
-            }
 
-            if(isset($xml['target']))
+            if(isset($xml['config']['target']))
             {
-                $class = ((int)$xml['target']['port'] === 21 || strtolower(trim($xml['target']['port'])) === "ftp") ? "Ftp" : "Sftp";
+                $class = ((int)$xml['config']['target']['port'] === 21 || strtolower(trim($xml['config']['target']['port'])) === "ftp") ? "Ftp" : "Sftp";
                 $this->_conn = new $class($this);
                 $this->_conn->init
                 (
-                    $xml['target']['host'],
-                    $xml['target']['port'],
-                    $xml['target']['user'],
-                    $xml['target']['pass']
+                    $xml['config']['target']['host'],
+                    $xml['config']['target']['port'],
+                    $xml['config']['target']['user'],
+                    $xml['config']['target']['pass']
                 );
                 $this->_conn->connect();
             }else{
@@ -327,11 +507,7 @@ class Syncd
     {
         $tmp = array();
         $xml =& $this->_xmlArray['jobs'];
-        
-        if(isset($xml['job']))
-        {
-            $xml['job'] = array($xml['job']);
-        }
+
         if(!isset($xml['job'][0]))
         {
             throw new Exception("there is nothing to sync");
@@ -342,389 +518,397 @@ class Syncd
         $j = 0;
         foreach($xml['job'] as $k => $v)
         {
-            $this->log(".executing job: $j", self::LOG_NOTICE);
-            $resync = (bool)$this->get("config.resync", false);
-            if($this->is("jobs.job.$j.#attrs.resync"))
+            if($v !== null)
             {
-                $resync = (bool)$this->get("jobs.job.$j.#attrs.resync", false);
-            }
-            $skip = trim($this->get("config.skip"));
-            if($this->is("jobs.job.$j.#attrs.skip"))
-            {
-                $skip = trim($this->get("jobs.job.$j.#attrs.skip"));
-            }
-            $chmod = trim($this->get("config.chmod"));
-            if($this->is("jobs.job.$j.#attrs.chmod"))
-            {
-                $chmod = trim($this->get("jobs.job.$j.#attrs.chmod"));
-            }
-            $chown = trim($this->get("config.chown"));
-            if($this->is("jobs.job.$j.#attrs.chown"))
-            {
-                $chown = trim($this->get("jobs.job.$j.#attrs.chown"));
-            }
-            $chgrp = trim($this->get("config.chgrp"));
-            if($this->is("jobs.job.$j.#attrs.chgrp"))
-            {
-                $chgrp = trim($this->get("jobs.job.$j.#attrs.chgrp"));
-            }
-            $compare = strtolower($this->get("config.compare"));
-            if($this->is("jobs.job.$j.#attrs.compare"))
-            {
-                $compare = strtolower($this->get("jobs.job.$j.#attrs.compare"));
-            }
-            $modified_since = trim($this->get("config.modified_since"));
-            if($this->is("jobs.job.$j.#attrs.modified_since"))
-            {
-                $modified_since = (bool)$this->get("jobs.job.$j.#attrs.modified_since");
-            }
-            $time_offset = $this->get("config.time_offset", 0);
-            $exclude = null;
-            if($this->is("jobs.job.$j.excludes.exclude"))
-            {
-                $exclude = $this->get("jobs.job.$j.excludes.exclude");
-                if(!is_array($exclude))
+                $id = $v['#attrs']['id'];
+                $this->log(".executing job: $j with id: $id", self::LOG_NOTICE);
+                $resync = (bool)$this->get("config.resync", false);
+                if($this->is("jobs.job.$j.#attrs.resync"))
                 {
-                    $exclude = array($exclude);
+                    $resync = (bool)$this->get("jobs.job.$j.#attrs.resync", false);
                 }
-            }
-
-            $this->log("..using compare mode: $compare", self::LOG_NOTICE);
-            $this->log("..using resync option: " . (($resync) ? "yes" : "no"), self::LOG_NOTICE);
-            $this->log("..using skip rules: $skip", self::LOG_NOTICE);
-            $this->log("..using chmod value: $chmod", self::LOG_NOTICE);
-            $this->log("..using chown value: $chown", self::LOG_NOTICE);
-            $this->log("..using chgrp value: $chgrp", self::LOG_NOTICE);
-            $this->log("..using modified since value: ".((!empty($modified_since)) ? $modified_since : ""), self::LOG_NOTICE);
-            $this->log("..using time offset value: ".$time_offset, self::LOG_NOTICE);
-
-            //testing for user
-            if(!empty($chown))
-            {
-                if(!$this->_conn->isOwn($chown))
+                $skip = trim($this->get("config.skip"));
+                if($this->is("jobs.job.$j.#attrs.skip"))
                 {
-                    $this->log("....user: $chown does not exist on target server", self::LOG_ERROR, true);
+                    $skip = trim($this->get("jobs.job.$j.#attrs.skip"));
                 }
-            }
-
-            //testing for group
-            if(!empty($chgrp))
-            {
-                if(!$this->_conn->isGrp($chgrp))
+                $chmod = trim($this->get("config.chmod"));
+                if($this->is("jobs.job.$j.#attrs.chmod"))
                 {
-                    $this->log("....group: $chgrp does not exist on target server", self::LOG_ERROR, true);
+                    $chmod = trim($this->get("jobs.job.$j.#attrs.chmod"));
                 }
-            }
-
-            //testing source dir
-            $source = rtrim($this->get("config.sourcebase"), DIRECTORY_SEPARATOR."*") . DIRECTORY_SEPARATOR . trim($v['source'], DIRECTORY_SEPARATOR."*") . DIRECTORY_SEPARATOR;
-            $this->log("...validating source dir: $source", self::LOG_NOTICE);
-            if(!is_dir($source) && is_readable($source))
-            {
-                $this->log("....dir: $source FAILED (not found or not readable)", self::LOG_ERROR, true);
-            }
-
-            //testing target dir and setting current working directory
-            if($this->is("config.targetbase"))
-            {
-                $cwd = $this->get("config.targetbase");
-                if($cwd === DIRECTORY_SEPARATOR)
+                $chown = trim($this->get("config.chown"));
+                if($this->is("jobs.job.$j.#attrs.chown"))
                 {
-                    $this->_conn->setCwd("/");
-                }else{
-                   $this->_conn->setCwd(DIRECTORY_SEPARATOR . trim($this->get("config.targetbase"), DIRECTORY_SEPARATOR."*") .  DIRECTORY_SEPARATOR);
+                    $chown = trim($this->get("jobs.job.$j.#attrs.chown"));
                 }
-            }else{
-                $this->_conn->setCwd();
-            }
-            $target = trim($v['target'], DIRECTORY_SEPARATOR."*") . DIRECTORY_SEPARATOR;
-            $this->log("...validating target dir: $target", self::LOG_NOTICE);
-
-            if(!$this->_conn->testDir($target))
-            {
-                $this->log("....dir: $target FAILED (not found or not writeable)", self::LOG_ERROR, true);
-            }
-            
-            $skip = explode(",", str_replace(array(";", ".", "*"), array(",", "", ""), $skip));
-
-            //prepare modified since value
-            if(!empty($modified_since))
-            {
-                $modified_since = trim($modified_since);
-                //assume timestamp
-                if(is_numeric($modified_since) && (int)$modified_since == $modified_since){
-                    $modified_since = (int)$modified_since;
-                //assume date/time
-                }else if((bool)preg_match("/^([\d]{1,2})(?:\-|\/|\.)([\d]{1,2})(?:\-|\/|\.)([\d]{2,4})\s+([\d]{2})(?:\:)([\d]{2})(?:\:)([\d]{2})$/i", $modified_since, $m)){
-                    $modified_since = mktime((int)$m[4], (int)$m[5], (int)$m[6], (int)$m[1], (int)$m[2], (int)$m[3]);
-                //assume date
-                }else if((bool)preg_match("/^([\d]{1,2})(?:\-|\/.)([\d]{1,2})(?:\-|\/.)([\d]{2,4})$/i", $modified_since, $m)){
-                    $modified_since = mktime(0, 0, 0, (int)$m[1], (int)$m[2], (int)$m[3]);
-                }else{
-                    throw new Exception("modified since date: $modified_since is not a valid date/time");
-                }
-            }
-
-            //prepare offset value
-            if(!empty($time_offset))
-            {
-                if(is_numeric($time_offset)){
-                    $time_offset = (int)$time_offset;
-                }else{
-                    throw new Exception("server time offset: $time_offset is not a valid value");
-                }
-            }
-
-            //prepare exclude values
-            if($exclude !== null)
-            {
-                foreach($exclude as &$ex)
+                $chgrp = trim($this->get("config.chgrp"));
+                if($this->is("jobs.job.$j.#attrs.chgrp"))
                 {
-                    $ex = trim($ex, "*");
-                    //the exclude rule is a absolute path to directory
-                    if(@is_dir($ex)){
-                        $ex = "#^" . addslashes(DIRECTORY_SEPARATOR . trim($ex, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR) . ".*#i";
-                    //the exclude rule is a relative path to directory
-                    }else if(@is_dir($source . ltrim($ex, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR)){
-                        $ex = "#^" . addslashes($source . trim($ex, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR). ".*#i";
-                    //the exclude rule is a file with directory address
-                    }else if(stristr($ex, DIRECTORY_SEPARATOR) !== false){
-                        $ex = "#".addslashes($source . ltrim($ex, DIRECTORY_SEPARATOR))."$#i";
-                    //the exclude rule is a file only
+                    $chgrp = trim($this->get("jobs.job.$j.#attrs.chgrp"));
+                }
+                $compare = strtolower($this->get("config.compare"));
+                if($this->is("jobs.job.$j.#attrs.compare"))
+                {
+                    $compare = strtolower($this->get("jobs.job.$j.#attrs.compare"));
+                }
+                $modified_since = trim($this->get("config.modified_since"));
+                if($this->is("jobs.job.$j.#attrs.modified_since"))
+                {
+                    $modified_since = (bool)$this->get("jobs.job.$j.#attrs.modified_since");
+                }
+                $time_offset = $this->get("config.time_offset", 0);
+                $exclude = null;
+                if($this->is("jobs.job.$j.excludes.exclude"))
+                {
+                    $exclude = $this->get("jobs.job.$j.excludes.exclude");
+                    if(!is_array($exclude))
+                    {
+                        $exclude = array($exclude);
+                    }
+                }
+
+                $this->log("..using compare mode: $compare", self::LOG_NOTICE);
+                $this->log("..using resync option: " . (($resync) ? "yes" : "no"), self::LOG_NOTICE);
+                $this->log("..using skip rules: $skip", self::LOG_NOTICE);
+                $this->log("..using chmod value: $chmod", self::LOG_NOTICE);
+                $this->log("..using chown value: $chown", self::LOG_NOTICE);
+                $this->log("..using chgrp value: $chgrp", self::LOG_NOTICE);
+                $this->log("..using modified since value: ".((!empty($modified_since)) ? $modified_since : ""), self::LOG_NOTICE);
+                $this->log("..using time offset value: ".$time_offset, self::LOG_NOTICE);
+
+                //testing for user
+                if(!empty($chown))
+                {
+                    if(!$this->_conn->isOwn($chown))
+                    {
+                        $this->log("....user: $chown does not exist on target server", self::LOG_ERROR, true);
+                    }
+                }
+
+                //testing for group
+                if(!empty($chgrp))
+                {
+                    if(!$this->_conn->isGrp($chgrp))
+                    {
+                        $this->log("....group: $chgrp does not exist on target server", self::LOG_ERROR, true);
+                    }
+                }
+
+                //testing source dir
+                $source = rtrim($this->get("config.sourcebase"), DIRECTORY_SEPARATOR."*") . DIRECTORY_SEPARATOR . trim($v['source'], DIRECTORY_SEPARATOR."*") . DIRECTORY_SEPARATOR;
+                $this->log("...validating source dir: $source", self::LOG_NOTICE);
+                if(!is_dir($source) && is_readable($source))
+                {
+                    $this->log("....dir: $source FAILED (not found or not readable)", self::LOG_ERROR, true);
+                }
+
+                //testing target dir and setting current working directory
+                if($this->is("config.targetbase"))
+                {
+                    $cwd = $this->get("config.targetbase");
+                    if($cwd === DIRECTORY_SEPARATOR)
+                    {
+                        $this->_conn->setCwd("/");
                     }else{
-                        $ex = "#(.*)".addslashes($ex)."$#i";
+                       $this->_conn->setCwd(DIRECTORY_SEPARATOR . trim($this->get("config.targetbase"), DIRECTORY_SEPARATOR."*") .  DIRECTORY_SEPARATOR);
                     }
+                }else{
+                    $this->_conn->setCwd();
                 }
-                unset($ex);
-            }
+                $target = trim($v['target'], DIRECTORY_SEPARATOR."*") . DIRECTORY_SEPARATOR;
+                $this->log("...validating target dir: $target", self::LOG_NOTICE);
 
-            $iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($source), RecursiveIteratorIterator::SELF_FIRST);
-
-            //iterate to source directories and sync
-            foreach($iterator as $i)
-            {
-                $source_absolute_path   = ($i->isDir()) ? rtrim($i->__toString(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR : $i->__toString();
-                $source_relative_path   = DIRECTORY_SEPARATOR . trim(str_replace($source, "", $source_absolute_path), DIRECTORY_SEPARATOR);
-                $target_absolute_path   = $target . trim($source_relative_path, DIRECTORY_SEPARATOR);
-                $tmp[]                  = $source_relative_path;
-
-                //get permissions and convert accordingly
-                if(($source_permission = @fileperms($source_absolute_path)) !== false)
+                if(!$this->_conn->testDir($target))
                 {
-                    if(!empty($chmod))
-                    {
-                        $source_permission_num = octdec((string)(int)$chmod);
-                        $source_permission_str = str_pad(trim($chmod), 4, 0, STR_PAD_LEFT);
+                    $this->log("....dir: $target FAILED (not found or not writeable)", self::LOG_ERROR, true);
+                }
+
+                $skip = explode(",", str_replace(array(";", ".", "*"), array(",", "", ""), $skip));
+
+                //prepare modified since value
+                if(!empty($modified_since))
+                {
+                    $modified_since = trim($modified_since);
+                    //assume timestamp
+                    if(is_numeric($modified_since) && (int)$modified_since == $modified_since){
+                        $modified_since = (int)$modified_since;
+                    //assume date/time
+                    }else if((bool)preg_match("/^([\d]{1,2})(?:\-|\/|\.)([\d]{1,2})(?:\-|\/|\.)([\d]{2,4})\s+([\d]{2})(?:\:)([\d]{2})(?:\:)([\d]{2})$/i", $modified_since, $m)){
+                        $modified_since = mktime((int)$m[4], (int)$m[5], (int)$m[6], (int)$m[1], (int)$m[2], (int)$m[3]);
+                    //assume date
+                    }else if((bool)preg_match("/^([\d]{1,2})(?:\-|\/.)([\d]{1,2})(?:\-|\/.)([\d]{2,4})$/i", $modified_since, $m)){
+                        $modified_since = mktime(0, 0, 0, (int)$m[1], (int)$m[2], (int)$m[3]);
                     }else{
-                        $source_permission_num = $this->getMod($source_permission);
-                        $source_permission_str = substr(decoct($source_permission), -4);
+                        throw new Exception("modified since date: $modified_since is not a valid date/time");
                     }
-                }else{
-                    $this->log("...file/dir: $source_absolute_path is skipped because unable to get file permission from source file/dir", self::LOG_ERROR);
-                    continue 1;
                 }
 
-                //get chown user
-                $owner = fileowner($source_absolute_path);
-                if($owner !== false && ($owner = posix_getpwuid((int)$owner)) !== false)
+                //prepare offset value
+                if(!empty($time_offset))
                 {
-                    if(!empty($chown))
-                    {
-                        if(strtolower(trim($owner['name'])) === strtolower(trim((string)$chown)))
-                        {
-                            $chown = "";
-                        }
+                    if(is_numeric($time_offset)){
+                        $time_offset = (int)$time_offset;
+                    }else{
+                        throw new Exception("server time offset: $time_offset is not a valid value");
                     }
-                }else{
-                    $this->log("...file/dir: $source_absolute_path is skipped because unable to get owner from source file/dir", self::LOG_ERROR);
-                    continue 1;
                 }
 
-                //get chgrp group
-                $group = filegroup($source_absolute_path);
-                if($group !== false && ($group = posix_getgrgid((int)$group)) !== false)
-                {
-                    if(!empty($chgrp))
-                    {
-                        if(strtolower(trim($group['name'])) === strtolower(trim((string)$chgrp)))
-                        {
-                            $chgrp = "";
-                        }
-                    }
-                }else{
-                    $this->log("...file/dir: $source_absolute_path is skipped because unable to get group from source file/dir", self::LOG_ERROR);
-                    continue 1;
-                }
-
+                //prepare exclude values
                 if($exclude !== null)
                 {
-                    foreach($exclude as $ex)
+                    foreach($exclude as &$ex)
                     {
-                        if((bool)preg_match($ex, $source_absolute_path))
-                        {
-                            $this->log("...file/dir: $source_absolute_path is skipped from sync since file/dir was found in exclude rule: $ex", self::LOG_NOTICE);
-                            continue 2;
+                        $ex = trim($ex, "*");
+                        //the exclude rule is a absolute path to directory
+                        if(@is_dir($ex)){
+                            $ex = "#^" . addslashes(DIRECTORY_SEPARATOR . trim($ex, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR) . ".*#i";
+                        //the exclude rule is a relative path to directory
+                        }else if(@is_dir($source . ltrim($ex, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR)){
+                            $ex = "#^" . addslashes($source . trim($ex, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR). ".*#i";
+                        //the exclude rule is a file with directory address
+                        }else if(stristr($ex, DIRECTORY_SEPARATOR) !== false){
+                            $ex = "#".addslashes($source . ltrim($ex, DIRECTORY_SEPARATOR))."$#i";
+                        //the exclude rule is a file only
+                        }else{
+                            $ex = "#(.*)".addslashes($ex)."$#i";
                         }
                     }
+                    unset($ex);
                 }
 
-                if(!empty($modified_since) !== null && !$i->isDir() && ((int)$i->getMTime() + $time_offset) < $modified_since)
-                {
-                    $this->log("...file: $source_absolute_path is skipped from sync since file modification time: ".strftime("%m-%d-%y %H:%M:%S", $i->getMTime()) . (($time_offset > 0) ? "+ time offset" : "")." is < ".strftime("%m-%d-%y %H:%M:%S", $modified_since), self::LOG_NOTICE);
-                    continue 1;
-                }
+                $iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($source), RecursiveIteratorIterator::SELF_FIRST);
 
-                if(!$i->isDir())
+                //iterate to source directories and sync
+                foreach($iterator as $i)
                 {
-                    $ext = strtolower(str_replace(".", "", trim(substr($source_absolute_path, strrpos($source_absolute_path, ".") + 1))));
-                    if(sizeof($skip) > 0 && in_array($ext, $skip))
+                    $source_absolute_path   = ($i->isDir()) ? rtrim($i->__toString(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR : $i->__toString();
+                    $source_relative_path   = DIRECTORY_SEPARATOR . trim(str_replace($source, "", $source_absolute_path), DIRECTORY_SEPARATOR);
+                    $target_absolute_path   = $target . trim($source_relative_path, DIRECTORY_SEPARATOR);
+                    $tmp[]                  = $source_relative_path;
+
+                    //get permissions and convert accordingly
+                    if(($source_permission = @fileperms($source_absolute_path)) !== false)
                     {
-                        $this->log("...file: $source_absolute_path is skipped from sync because of skip rule in place", self::LOG_NOTICE);
-                        continue;
-                    }
-                    if($this->_conn->isFile($target_absolute_path) && !empty($compare))
-                    {
-                        if($compare === "time")
+                        if(!empty($chmod))
                         {
-                            if((int)$i->getMTime() > $this->_conn->fileTime($target_absolute_path))
+                            $source_permission_num = octdec((string)(int)$chmod);
+                            $source_permission_str = str_pad(trim($chmod), 4, 0, STR_PAD_LEFT);
+                        }else{
+                            $source_permission_num = $this->getMod($source_permission);
+                            $source_permission_str = substr(decoct($source_permission), -4);
+                        }
+                    }else{
+                        $this->log("...file/dir: $source_absolute_path is skipped because unable to get file permission from source file/dir", self::LOG_ERROR);
+                        continue 1;
+                    }
+
+                    //get chown user
+                    $owner = fileowner($source_absolute_path);
+                    if($owner !== false && ($owner = posix_getpwuid((int)$owner)) !== false)
+                    {
+                        if(!empty($chown))
+                        {
+                            if(strtolower(trim($owner['name'])) === strtolower(trim((string)$chown)))
                             {
-                                $this->log("...file: $source_absolute_path already exists on target server at: $target_absolute_path and will be overwritten since source file is newer", self::LOG_NOTICE);
-                                if($this->_mode === self::MODE_LIVE)
-                                {
-                                    if($this->_conn->copy($source_absolute_path, $target_absolute_path, $source_permission_num))
-                                    {
-                                        $this->log("....file: $source_absolute_path OK", self::LOG_SUCCESS);
-                                    }else{
-                                        $this->log("....file: $source_absolute_path FAILED", self::LOG_ERROR);
-                                    }
-                                    if(!empty($chown))
-                                    {
-                                        $this->_conn->chOwn($target_absolute_path, $chown);
-                                    }
-                                    if(!empty($chgrp))
-                                    {
-                                        $this->_conn->chGrp($target_absolute_path, $chgrp);
-                                    }
-                                }
-                            }else{
-                                $this->log("...file: $source_absolute_path already exists on target server at: $target_absolute_path and will NOT be overwritten since target file is newer", self::LOG_NOTICE);
-                            }
-                        }else if($compare === "size"){
-                            if((int)$i->getSize() !== $this->_conn->fileSize($target_absolute_path))
-                            {
-                                $this->log("...file: $source_absolute_path already exists on target server at: $target_absolute_path and will be overwritten since file size has changed", self::LOG_NOTICE);
-                                if($this->_mode === self::MODE_LIVE)
-                                {
-                                    if($this->_conn->copy($source_absolute_path, $target_absolute_path, $source_permission_num))
-                                    {
-                                        $this->log("....file: $source_absolute_path OK", self::LOG_SUCCESS);
-                                    }else{
-                                        $this->log("....file: $source_absolute_path FAILED", self::LOG_ERROR);
-                                    }
-                                    if(!empty($chown))
-                                    {
-                                        $this->_conn->chOwn($target_absolute_path, $chown);
-                                    }
-                                    if(!empty($chgrp))
-                                    {
-                                        $this->_conn->chGrp($target_absolute_path, $chgrp);
-                                    }
-                                }
-                            }else{
-                                $this->log("...file: $source_absolute_path already exists on target server at: $target_absolute_path and will NOT be overwritten since file size has NOT changed", self::LOG_NOTICE);
+                                $chown = "";
                             }
                         }
                     }else{
-                        $this->log("...file: $source_absolute_path does not exists on target server and will be copied", self::LOG_NOTICE);
-                        if($this->_mode === self::MODE_LIVE)
-                        {
-                            if($this->_conn->copy($source_absolute_path, $target_absolute_path, $source_permission_num))
-                            {
-                                $this->log("....file: $source_absolute_path OK", self::LOG_SUCCESS);
-                            }else{
-                                $this->log("....file: $source_absolute_path FAILED", self::LOG_ERROR);
-                            }
-                            if(!empty($chown))
-                            {
-                                $this->_conn->chOwn($target_absolute_path, $chown);
-                            }
-                            if(!empty($chgrp))
-                            {
-                                $this->_conn->chGrp($target_absolute_path, $chgrp);
-                            }
-                        }
+                        $this->log("...file/dir: $source_absolute_path is skipped because unable to get owner from source file/dir", self::LOG_ERROR);
+                        continue 1;
                     }
-                }else{
-                    if(!$this->_conn->isDir($target_absolute_path))
-                    {
-                        $this->log("...dir: $target_absolute_path does not exists on target server and will be created", self::LOG_NOTICE);
-                        if($this->_mode === self::MODE_LIVE)
-                        {
-                            if($this->_conn->mkDir($target_absolute_path, $source_permission_num))
-                            {
-                                $this->log("....dir: $source_absolute_path OK", self::LOG_SUCCESS);
-                            }else{
-                                $this->log("....dir: $source_absolute_path FAILED", self::LOG_ERROR);
-                            }
-                            if(!empty($chown))
-                            {
-                                $this->_conn->chOwn($target_absolute_path, $chown);
-                            }
-                            if(!empty($chgrp))
-                            {
-                                $this->_conn->chGrp($target_absolute_path, $chgrp);
-                            }
-                        }
-                    }
-                }
-                @clearstatcache();
-            }
 
-            if($resync)
-            {
-                $this->log("..searching for orphaned files/dirs", self::LOG_NOTICE);
-                if(($iterator = $this->_conn->lsDir($target)) !== false)
-                {
-                    foreach($iterator as $i)
+                    //get chgrp group
+                    $group = filegroup($source_absolute_path);
+                    if($group !== false && ($group = posix_getgrgid((int)$group)) !== false)
                     {
-                        $_i = DIRECTORY_SEPARATOR . ltrim(str_replace($target, "", $i), DIRECTORY_SEPARATOR);
-                        if(!in_array($_i, $tmp))
+                        if(!empty($chgrp))
                         {
-                            $this->log("...file/dir: $i has been detected as orphaned and will be deleted", self::LOG_NOTICE);
-                            if($this->_mode === self::MODE_LIVE)
+                            if(strtolower(trim($group['name'])) === strtolower(trim((string)$chgrp)))
                             {
-                                $type = $this->_conn->fileType($i);
-                                if($type !== false)
+                                $chgrp = "";
+                            }
+                        }
+                    }else{
+                        $this->log("...file/dir: $source_absolute_path is skipped because unable to get group from source file/dir", self::LOG_ERROR);
+                        continue 1;
+                    }
+
+                    if($exclude !== null)
+                    {
+                        foreach($exclude as $ex)
+                        {
+                            if((bool)preg_match($ex, $source_absolute_path))
+                            {
+                                $this->log("...file/dir: $source_absolute_path is skipped from sync since file/dir was found in exclude rule: $ex", self::LOG_NOTICE);
+                                continue 2;
+                            }
+                        }
+                    }
+
+                    if(!empty($modified_since) !== null && !$i->isDir() && ((int)$i->getMTime() + $time_offset) < $modified_since)
+                    {
+                        $this->log("...file: $source_absolute_path is skipped from sync since file modification time: ".strftime("%m-%d-%y %H:%M:%S", $i->getMTime()) . (($time_offset > 0) ? "+ time offset" : "")." is < ".strftime("%m-%d-%y %H:%M:%S", $modified_since), self::LOG_NOTICE);
+                        continue 1;
+                    }
+
+                    if(!$i->isDir())
+                    {
+                        $ext = strtolower(str_replace(".", "", trim(substr($source_absolute_path, strrpos($source_absolute_path, ".") + 1))));
+                        if(sizeof($skip) > 0 && in_array($ext, $skip))
+                        {
+                            $this->log("...file: $source_absolute_path is skipped from sync because of skip rule in place", self::LOG_NOTICE);
+                            continue;
+                        }
+                        if($this->_conn->isFile($target_absolute_path) && !empty($compare))
+                        {
+                            if($compare === "time")
+                            {
+                                if((int)$i->getMTime() > $this->_conn->fileTime($target_absolute_path))
                                 {
-                                    if($type === "dir")
+                                    $this->log("...file: $source_absolute_path already exists on target server at: $target_absolute_path and will be overwritten since source file is newer", self::LOG_NOTICE);
+                                    if($this->_mode === self::MODE_LIVE)
                                     {
-                                        if($this->_conn->rmDir($i))
+                                        if($this->_conn->copy($source_absolute_path, $target_absolute_path, $source_permission_num))
                                         {
-                                            $this->log("....dir: $i deleted OK", self::LOG_SUCCESS);
+                                            $this->log("....file: $source_absolute_path OK", self::LOG_SUCCESS);
                                         }else{
-                                            $this->log("....dir: $i deleted FAILED", self::LOG_ERROR);
+                                            $this->log("....file: $source_absolute_path FAILED", self::LOG_ERROR);
                                         }
-                                    }else{
-                                        if($this->_conn->rmFile($i))
+                                        if(!empty($chown))
                                         {
-                                            $this->log("....file: $i deleted OK", self::LOG_SUCCESS);
-                                        }else{
-                                            $this->log("....file: $i deleted FAILED", self::LOG_ERROR);
+                                            $this->_conn->chOwn($target_absolute_path, $chown);
+                                        }
+                                        if(!empty($chgrp))
+                                        {
+                                            $this->_conn->chGrp($target_absolute_path, $chgrp);
                                         }
                                     }
                                 }else{
-                                    $this->log("....file/dir: $i type could not be identified", self::LOG_ERROR);
+                                    $this->log("...file: $source_absolute_path already exists on target server at: $target_absolute_path and will NOT be overwritten since target file is newer", self::LOG_NOTICE);
+                                }
+                            }else if($compare === "size"){
+                                if((int)$i->getSize() !== $this->_conn->fileSize($target_absolute_path))
+                                {
+                                    $this->log("...file: $source_absolute_path already exists on target server at: $target_absolute_path and will be overwritten since file size has changed", self::LOG_NOTICE);
+                                    if($this->_mode === self::MODE_LIVE)
+                                    {
+                                        if($this->_conn->copy($source_absolute_path, $target_absolute_path, $source_permission_num))
+                                        {
+                                            $this->log("....file: $source_absolute_path OK", self::LOG_SUCCESS);
+                                        }else{
+                                            $this->log("....file: $source_absolute_path FAILED", self::LOG_ERROR);
+                                        }
+                                        if(!empty($chown))
+                                        {
+                                            $this->_conn->chOwn($target_absolute_path, $chown);
+                                        }
+                                        if(!empty($chgrp))
+                                        {
+                                            $this->_conn->chGrp($target_absolute_path, $chgrp);
+                                        }
+                                    }
+                                }else{
+                                    $this->log("...file: $source_absolute_path already exists on target server at: $target_absolute_path and will NOT be overwritten since file size has NOT changed", self::LOG_NOTICE);
+                                }
+                            }
+                        }else{
+                            $this->log("...file: $source_absolute_path does not exists on target server and will be copied", self::LOG_NOTICE);
+                            if($this->_mode === self::MODE_LIVE)
+                            {
+                                if($this->_conn->copy($source_absolute_path, $target_absolute_path, $source_permission_num))
+                                {
+                                    $this->log("....file: $source_absolute_path OK", self::LOG_SUCCESS);
+                                }else{
+                                    $this->log("....file: $source_absolute_path FAILED", self::LOG_ERROR);
+                                }
+                                if(!empty($chown))
+                                {
+                                    $this->_conn->chOwn($target_absolute_path, $chown);
+                                }
+                                if(!empty($chgrp))
+                                {
+                                    $this->_conn->chGrp($target_absolute_path, $chgrp);
+                                }
+                            }
+                        }
+                    }else{
+                        if(!$this->_conn->isDir($target_absolute_path))
+                        {
+                            $this->log("...dir: $target_absolute_path does not exists on target server and will be created", self::LOG_NOTICE);
+                            if($this->_mode === self::MODE_LIVE)
+                            {
+                                if($this->_conn->mkDir($target_absolute_path, $source_permission_num))
+                                {
+                                    $this->log("....dir: $source_absolute_path OK", self::LOG_SUCCESS);
+                                }else{
+                                    $this->log("....dir: $source_absolute_path FAILED", self::LOG_ERROR);
+                                }
+                                if(!empty($chown))
+                                {
+                                    $this->_conn->chOwn($target_absolute_path, $chown);
+                                }
+                                if(!empty($chgrp))
+                                {
+                                    $this->_conn->chGrp($target_absolute_path, $chgrp);
                                 }
                             }
                         }
                     }
-                }else{
-                    $this->log("..dir: $target could not be opened for orphaned files lookup", self::LOG_ERROR);
+                    @clearstatcache();
                 }
+
+                if($resync)
+                {
+                    $this->log("..searching for orphaned files/dirs", self::LOG_NOTICE);
+                    if(($iterator = $this->_conn->lsDir($target)) !== false)
+                    {
+                        foreach($iterator as $i)
+                        {
+                            $_i = DIRECTORY_SEPARATOR . ltrim(str_replace($target, "", $i), DIRECTORY_SEPARATOR);
+                            if(!in_array($_i, $tmp))
+                            {
+                                $this->log("...file/dir: $i has been detected as orphaned and will be deleted", self::LOG_NOTICE);
+                                if($this->_mode === self::MODE_LIVE)
+                                {
+                                    $type = $this->_conn->fileType($i);
+                                    if($type !== false)
+                                    {
+                                        if($type === "dir")
+                                        {
+                                            if($this->_conn->rmDir($i))
+                                            {
+                                                $this->log("....dir: $i deleted OK", self::LOG_SUCCESS);
+                                            }else{
+                                                $this->log("....dir: $i deleted FAILED", self::LOG_ERROR);
+                                            }
+                                        }else{
+                                            if($this->_conn->rmFile($i))
+                                            {
+                                                $this->log("....file: $i deleted OK", self::LOG_SUCCESS);
+                                            }else{
+                                                $this->log("....file: $i deleted FAILED", self::LOG_ERROR);
+                                            }
+                                        }
+                                    }else{
+                                        $this->log("....file/dir: $i type could not be identified", self::LOG_ERROR);
+                                    }
+                                }
+                            }
+                        }
+                    }else{
+                        $this->log("..dir: $target could not be opened for orphaned files lookup", self::LOG_ERROR);
+                    }
+                }
+                $this->log(".job: $j with id: $id completed", self::LOG_NOTICE);
+                if($this->_mode === self::MODE_LIVE)
+                {
+                    @file_put_contents($this->_jobFile, implode(",", array(basename($this->_xml), $id, time())) . "\n", FILE_APPEND);
+                }
+                @clearstatcache();
+                $j++;
             }
-            $this->log(".job: $j completed", self::LOG_NOTICE);
-            @clearstatcache();
-            $j++;
         }
         if($this->_conn->hasError())
         {
@@ -785,6 +969,7 @@ class Syncd
      * @param null|array|string $mixed expects log entry
      * @param string $level optional expects log level
      * @param boolean $quit optional whether to quit sync or not
+     * @param boolean $write optional whether to write to log file or omit
      * @return void
      */
     public function log($mixed = null, $level = self::LOG_NOTICE, $quit = false)
@@ -984,18 +1169,22 @@ class Syncd
     {
         if($this->_mode === self::MODE_TEST_LOGGED || $this->_mode === self::MODE_LIVE)
         {
-            $txt = "Sync report for: ".$this->_xml." on: ". strftime("%d-%m-%Y %H:%I:%S", time())."\r\n";
-            foreach($this->_log as $log)
+            if(sizeof($this->_log) >= 1)
             {
-                $txt .= strtoupper($log[1]).": " . $log[0] . "\n";
-            }
-            if(!empty($txt))
-            {
-                @file_put_contents($this->_logFile, $txt);
+                $txt = "Sync report for: ".$this->_xml." on: ". strftime("%d-%m-%Y %H:%I:%S", time())."\r\n";
+                foreach($this->_log as $log)
+                {
+                    $txt .= strtoupper($log[1]).": " . $log[0] . "\n";
+                }
+                if(!empty($txt))
+                {
+                    @file_put_contents($this->_logFile, $txt);
+                }
             }
         }
     }
 }
+
 
 /**
 * @author setcookie <set@cooki.me>
