@@ -176,7 +176,7 @@
  * @copyright Copyright &copy; 2011-2012 setcookie
  * @license http://www.gnu.org/copyleft/gpl.html
  * @package syncd
- * @version 0.0.6
+ * @version 0.0.7
  * @desc base class for sync
  * @throws Exception
  */
@@ -226,7 +226,6 @@ class Syncd
             if(strtolower(trim(php_sapi_name())) !== 'cli')
             {
                 echo "script can only be called from command line (cli)";
-                die();
                 exit(0);
             }
             if(!defined("DIRECTORY_SEPARATOR"))
@@ -241,9 +240,9 @@ class Syncd
             {
                 throw new Exception("system does not support recursive iterators");
             }
-            if(!class_exists('DOMDocument', false))
+            if(!function_exists('json_encode'))
             {
-                throw new Exception("system does not support dom");
+                throw new Exception('system does not support json encode/decode functions');
             }
             if(stristr($xml, DIRECTORY_SEPARATOR) === false || (substr($xml, 0, 1) === DIRECTORY_SEPARATOR &&  substr_count($xml, DIRECTORY_SEPARATOR) === 1))
             {
@@ -251,14 +250,9 @@ class Syncd
             }else{
                 $this->_xml = $xml;
             }
-            if(($dom = DOMDocument::load($this->_xml, LIBXML_NOBLANKS | LIBXML_NOCDATA)) !== false)
-            {
-                $this->_xmlArray = array_shift($this->xmlToArray($dom));
-                $this->init();
-                $this->exec();
-            }else{
-                throw new Exception("xml config file: $xml not found or invalid");
-            }
+            $this->_xmlArray = $this->xmlToArray($this->_xml);
+            $this->init();
+            $this->exec();
         }
     }
 
@@ -357,39 +351,39 @@ class Syncd
 
         if(isset($xml['jobs']) && !empty($xml['jobs']))
         {
-            if(!isset($xml['jobs'][0]))
+            if(!isset($xml['jobs']['job'][0]))
             {
                 $xml['jobs']['job'] = array($xml['jobs']['job']);
             }
             $j = 0;
             foreach($xml['jobs']['job'] as $k => &$v)
             {
-                if(!$this->is("jobs.job.$j.#attrs.id"))
+                if(!$this->is("jobs.job.$j.@attributes.id"))
                 {
-                    $v['#attrs']['id'] = $j;
+                    $v['@attributes']['id'] = $j;
                 }
-                if($this->is("jobs.job.$j.#attrs.date"))
+                if($this->is("jobs.job.$j.@attributes.date"))
                 {
-                    if($this->is("jobs.job.$j.#attrs.type"))
+                    if($this->is("jobs.job.$j.@attributes.type"))
                     {
-                        $type = strtolower(trim($this->get("jobs.job.$j.#attrs.type")));
+                        $type = strtolower(trim($this->get("jobs.job.$j.@attributes.type")));
                     }else{
-                        $type = $v['#attrs']['type'] = 'once';
+                        $type = $v['@attributes']['type'] = 'once';
                     }
-                    $date = trim($this->get("jobs.job.$j.#attrs.date"));
-                    $id = trim($this->get("jobs.job.$j.#attrs.id"));
+                    $date = trim($this->get("jobs.job.$j.@attributes.date"));
+                    $id = trim($this->get("jobs.job.$j.@attributes.id"));
 
                     if(!in_array($type, array('once', 'daily')))
                     {
-                        throw new Exception("config file must define a supported attribute value for config.jobs.job.#attrs.type");
+                        throw new Exception("config file must define a supported attribute value for config.jobs.job.@attributes.type");
                     }
                     if(empty($date))
                     {
-                        throw new Exception("config file must define a supported attribute value for config.jobs.job.#attrs.date");
+                        throw new Exception("config file must define a supported attribute value for config.jobs.job.@attributes.date");
                     }
                     if(strlen($id) < 1)
                     {
-                        throw new Exception("config file must define a supported attribute value for config.jobs.job.#attrs.id");
+                        throw new Exception("config file must define a supported attribute value for config.jobs.job.@attributes.id");
                     }
                     switch($type)
                     {
@@ -406,7 +400,7 @@ class Syncd
                                     $v = null;
                                 }
                             }else{
-                                throw new Exception("job attribute value for config.jobs.job.#attrs.date is not a valid date value");
+                                throw new Exception("job attribute value for config.jobs.job.@attributes.date is not a valid date value");
                             }
                             break;
                         case 'daily':
@@ -425,7 +419,7 @@ class Syncd
                                     }
                                 }
                             }else{
-                                throw new Exception("job attribute value for config.jobs.job.#attrs.date is not a valid hourly value");
+                                throw new Exception("job attribute value for config.jobs.job.@attributes.date is not a valid hourly value");
                             }
                             break;
                         default:
@@ -516,46 +510,47 @@ class Syncd
         $this->log("starting sync", self::LOG_NOTICE);
 
         $j = 0;
+
         foreach($xml['job'] as $k => $v)
         {
             if($v !== null)
             {
-                $id = $v['#attrs']['id'];
+                $id = $v['@attributes']['id'];
                 $this->log(".executing job: $j with id: $id", self::LOG_NOTICE);
                 $resync = (bool)$this->get("config.resync", false);
-                if($this->is("jobs.job.$j.#attrs.resync"))
+                if($this->is("jobs.job.$j.@attributes.resync"))
                 {
-                    $resync = (bool)$this->get("jobs.job.$j.#attrs.resync", false);
+                    $resync = (bool)$this->get("jobs.job.$j.@attributes.resync", false);
                 }
                 $skip = trim($this->get("config.skip"));
-                if($this->is("jobs.job.$j.#attrs.skip"))
+                if($this->is("jobs.job.$j.@attributes.skip"))
                 {
-                    $skip = trim($this->get("jobs.job.$j.#attrs.skip"));
+                    $skip = trim($this->get("jobs.job.$j.@attributes.skip"));
                 }
                 $chmod = trim($this->get("config.chmod"));
-                if($this->is("jobs.job.$j.#attrs.chmod"))
+                if($this->is("jobs.job.$j.@attributes.chmod"))
                 {
-                    $chmod = trim($this->get("jobs.job.$j.#attrs.chmod"));
+                    $chmod = trim($this->get("jobs.job.$j.@attributes.chmod"));
                 }
                 $chown = trim($this->get("config.chown"));
-                if($this->is("jobs.job.$j.#attrs.chown"))
+                if($this->is("jobs.job.$j.@attributes.chown"))
                 {
-                    $chown = trim($this->get("jobs.job.$j.#attrs.chown"));
+                    $chown = trim($this->get("jobs.job.$j.@attributes.chown"));
                 }
                 $chgrp = trim($this->get("config.chgrp"));
-                if($this->is("jobs.job.$j.#attrs.chgrp"))
+                if($this->is("jobs.job.$j.@attributes.chgrp"))
                 {
-                    $chgrp = trim($this->get("jobs.job.$j.#attrs.chgrp"));
+                    $chgrp = trim($this->get("jobs.job.$j.@attributes.chgrp"));
                 }
                 $compare = strtolower($this->get("config.compare"));
-                if($this->is("jobs.job.$j.#attrs.compare"))
+                if($this->is("jobs.job.$j.@attributes.compare"))
                 {
-                    $compare = strtolower($this->get("jobs.job.$j.#attrs.compare"));
+                    $compare = strtolower($this->get("jobs.job.$j.@attributes.compare"));
                 }
                 $modified_since = trim($this->get("config.modified_since"));
-                if($this->is("jobs.job.$j.#attrs.modified_since"))
+                if($this->is("jobs.job.$j.@attributes.modified_since"))
                 {
-                    $modified_since = (bool)$this->get("jobs.job.$j.#attrs.modified_since");
+                    $modified_since = (bool)$this->get("jobs.job.$j.@attributes.modified_since");
                 }
                 $time_offset = $this->get("config.time_offset", 0);
                 $exclude = null;
@@ -969,7 +964,6 @@ class Syncd
      * @param null|array|string $mixed expects log entry
      * @param string $level optional expects log level
      * @param boolean $quit optional whether to quit sync or not
-     * @param boolean $write optional whether to write to log file or omit
      * @return void
      */
     public function log($mixed = null, $level = self::LOG_NOTICE, $quit = false)
@@ -1049,74 +1043,40 @@ class Syncd
 
 
     /**
-     * @desc translates DOM xml structure/object into array
-     * @param DOMNode|null $node expects the root/child node to recursive transform childs into array
+     * @desc convert xml file or string into array using json functions
+     * @param string $xml expects xml file pointer or xml string
      * @return array
+     * @throws Exception
      */
-    protected function xmlToArray(DOMNode $node = null)
+    protected function xmlToArray($xml)
     {
-        $result = array();
-        $group = array();
-        $attrs = null;
-        $children = null;
+        libxml_use_internal_errors(true);
 
-        if($node->hasAttributes())
+        if(is_file($xml))
         {
-            $attrs = $node->attributes;
-            foreach($attrs as $k => $v)
+            $xml = simplexml_load_file($xml, 'SimpleXMLElement', LIBXML_NOBLANKS | LIBXML_NOCDATA);
+        }else{
+            $xml = simplexml_load_string((string)$xml, 'SimpleXMLElement', LIBXML_NOBLANKS | LIBXML_NOCDATA);
+        }
+        if($xml !== false)
+        {
+            return json_decode(json_encode($xml), true);
+        }else{
+            $error = libxml_get_errors();
+            if(isset($error[0]))
             {
-                $result['#attrs'][$v->name] = $v->value;
+                throw new Exception("xml error: " . $error[0]['message']);
+            }else{
+                throw new Exception("unknown xml error - possible invalid xml file or string");
             }
         }
-
-        $children = $node->childNodes;
-
-        if(!empty($children))
-        {
-            if((int)$children->length === 1)
-            {
-                $child = $children->item(0);
-
-                if($child !== null && $child->nodeType === XML_TEXT_NODE)
-                {
-                    $result['#value'] = $child->nodeValue;
-                    if(count($result) == 1)
-                    {
-                        return $result['#value'];
-                    }else{
-                        return $result;
-                    }
-                }
-            }
-
-            for($i = 0; $i < (int)$children->length; $i++)
-            {
-                $child = $children->item($i);
-
-                if($child !== null)
-                {
-                    if(!isset($result[$child->nodeName]))
-                    {
-                        $result[$child->nodeName] = $this->xmlToArray($child);
-                    }else{
-                        if(!isset($group[$child->nodeName]))
-                        {
-                            $result[$child->nodeName] = array($result[$child->nodeName]);
-                            $group[$child->nodeName] = 1;
-                        }
-                        $result[$child->nodeName][] = $this->xmlToArray($child);
-                    }
-                }
-            }
-        }
-        return $result;
     }
 
 
     /**
      * @desc gets file permission from file
      * @static
-     * @param null $file
+     * @param null $mixed expects the file permission as octal or none octal
      * @return bool|int
      */
     public static function getMod($mixed = null)
