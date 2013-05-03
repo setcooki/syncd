@@ -1,17 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <root>
     <config>
-        <sourcebase></sourcebase>
-        <targetbase></targetbase>
         <compare>date</compare>
         <resync>1</resync>
         <skip>*.svn,*.git,*.log</skip>
         <logdir>/logs</logdir>
     </config>
     <jobs>
-        <job id="j1" compare="size" resync="1" type="daily" date="21:00">
-            <target><![CDATA[/var/www/syncd/tmp]]></target>
-            <source><![CDATA[/var/www/website/private]]></source>
+        <job id="j1" type="once" date="2013-05-03 13:00:00">
+            <target><![CDATA[/Volumes/Data/tmp/tmp2]]></target>
+            <source><![CDATA[/Volumes/Data/tmp/tmp1]]></source>
+            <actions>
+                <action type="delete"><![CDATA[/json]]></action>
+                <action type="delete"><![CDATA[/Volumes/Data/tmp/tmp2/folder]]></action>
+                <action type="delete"><![CDATA[/Volumes/Data/tmp/tmp2/test3.xml]]></action>
+                <action type="delete"><![CDATA[/test.ttf]]></action>
+            </actions>
         </job>
     </jobs>
 </root>
