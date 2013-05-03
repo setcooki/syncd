@@ -35,6 +35,7 @@
  * the > third argument or all arguments after the run modus argument are considered to be optional options which are lined up linux style with a trailing "-"
  * to signify that the argument is an option like: "-option1" but also "-option2=yes" which are options with key => value pairs. the following options are supported
  * - "-force" = will force the job to be executed regardless of any scheduled values for type "once|daily"
+ * - "-silent" = suppress all log message output in shell and allow only logging to log file
  *
  * NOTE: the directory in which this script resides must be writeable in order to write the log report if the config.logdir value is not set
  * NOTE: the script currently supports only sftp with ssh2 and normal user/pass authentification!
@@ -74,7 +75,7 @@
             </excludes>
             <actions>
                 <action type="delete"><![CDATA[/.htaccess]]></action>
-                <action type="delete"><![CDATA[/var/www/website/temp/]]></actions>
+                <action type="delete"><![CDATA[/var/www/website/temp/]]></action>
             </actions>
         </job>
     </jobs>
@@ -193,7 +194,7 @@
  * @copyright Copyright &copy; 2011-2012 setcookie
  * @license http://www.gnu.org/copyleft/gpl.html
  * @package syncd
- * @version 0.0.8
+ * @version 0.0.9
  * @desc base class for sync
  * @throws Exception
  */
@@ -208,7 +209,7 @@ class Syncd
     protected                   $_xml = null;
     protected                   $_dir = null;
     protected                   $_mode = null;
-    protected                   $_options = null;
+    protected                   $_options = array();
     protected                   $_xmlArray = null;
     protected                   $_conn = null;
     protected                   $_log = array();
@@ -1063,7 +1064,7 @@ class Syncd
                 $this->log(".job: $j with id: $id completed", self::LOG_NOTICE);
                 if($this->_mode === self::MODE_LIVE)
                 {
-                    @file_put_contents($this->_jobFile, implode(",", array(basename($this->_xml), $id, time())) . "\n", FILE_APPEND);
+                    @file_put_contents($this->_jobFile, implode(",", array(basename($this->_xml), $id, time(), strftime('%Y-%m-%d %H:%M:%S', time()))) . "\n", FILE_APPEND);
                 }
                 @clearstatcache();
                 $j++;
@@ -1150,7 +1151,10 @@ class Syncd
                     $this->_log[] = array($mixed, $level);
                 }
             }
-            $this->console($mixed, $level);
+            if(!array_key_exists('silent', $this->_options))
+            {
+                $this->console($mixed, $level);
+            }
             if((bool)$quit)
             {
                 exit(0);
