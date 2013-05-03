@@ -23,13 +23,18 @@
  * - bash:~$ php -f /path/to/syncd.php "config.xml"
  * - bash:~$ php -f /path/to/syncd.php "/var/www/tmp/config.xml"
  * - bash:~$ php -f /path/to/syncd.php "/var/www/tmp/config.xml" "live"
+ * - bash:~$ php -f /path/to/syncd.php "/var/www/tmp/config.xml" "live" -option1 -option2=1
  *
  * the first mandatory argument expects the path to the config xml file. path must be absolute or filename only if config.xml resides in same
  * directory as the script. the second mandatory argument expects the run modus as explained here:
  *
- * - "test"(default)  = simulates sync testing the basic requirements for a successful sync echoing everything in the shell
+ * - "test"(default) = simulates sync testing the basic requirements for a successful sync echoing everything in the shell
  * - "logged" = does the same as "test" with logging everything to a log report file
  * - "live" = executes the jobs defined in the config xml and also will write the report log file
+ *
+ * the > third argument or all arguments after the run modus argument are considered to be optional options which are lined up linux style with a trailing "-"
+ * to signify that the argument is an option like: "-option1" but also "-option2=yes" which are options with key => value pairs. the following options are supported
+ * - "-force" = will force the job to be executed regardless of any scheduled values for type "once|daily"
  *
  * NOTE: the directory in which this script resides must be writeable in order to write the log report if the config.logdir value is not set
  * NOTE: the script currently supports only sftp with ssh2 and normal user/pass authentification!
@@ -67,6 +72,10 @@
                 <exclude><![CDATA[/config/config.inc.php]]></exclude>
                 <exclude><![CDATA[functions.php]]></exclude>
             </excludes>
+            <actions>
+                <action type="delete"><![CDATA[/.htaccess]]></action>
+                <action type="delete"><![CDATA[/var/www/website/temp/]]></actions>
+            </actions>
         </job>
     </jobs>
 </root>
@@ -141,7 +150,7 @@
  *
  * 3) job.date (mandatory if job.type is set)
  * defines the date on when the job is supposed to be executed according to attribute job.type.
- * "once" = accepts a valid php strtotime value, see http://php.net/manual/en/datetime.formats.php
+ * "once" = accepts a valid php strtotime value, see http://php.net/manual/en/datetime.formats.php like "2013-05-03 10:55:00"
  * "daily" = expects a hourly value like "14:00", "09:30"
  *
  * The following parameters can be defined in job nodes as attribute to overwrite global values:
@@ -171,12 +180,20 @@
  * - filename + extension (will exclude all files of the same name in all directories of job source path!)
  * - path + filename # extension will exclude a specific file from job source path (defined relative or absolute)
  *
+ * 4) job.actions (optional)
+ * defines a list of actions applied after sync on target server - currently only type "delete" supported. this option is mend to perform actions
+ * on the target server after the sync providing for more flexibility. the action will work on:
+ * - absolute path/folder in target
+ * - relative path/folder in target
+ * - absolute file pointer in target
+ * - relative file pointer in target
+ *
  * @author setcookie <set@cooki.me>
  * @link set.cooki.me
  * @copyright Copyright &copy; 2011-2012 setcookie
  * @license http://www.gnu.org/copyleft/gpl.html
  * @package syncd
- * @version 0.0.7
+ * @version 0.0.8
  * @desc base class for sync
  * @throws Exception
  */
@@ -191,6 +208,7 @@ class Syncd
     protected                   $_xml = null;
     protected                   $_dir = null;
     protected                   $_mode = null;
+    protected                   $_options = null;
     protected                   $_xmlArray = null;
     protected                   $_conn = null;
     protected                   $_log = array();
@@ -205,54 +223,74 @@ class Syncd
     /**
      * @desc validates parameter and checks for valid environment
      * @throws Exception
-     * @param string|null $xml expects absolute or relative path to config xml
+     * @param string $xml expects absolute or relative path to config xml
      * @param string $mode expects the run mode
+     * @param array $options expects optional options array
      */
-    public function __construct($xml = null, $mode = self::MODE_TEST)
+    public function __construct($xml, $mode, Array $options = null)
     {
-        if($xml !== null)
-        {
-            @set_time_limit(0);
-            @error_reporting(E_ALL);
-            @ini_set("display_errors", 0);
-            @ini_set('memory_limit', '512M');
+        @set_time_limit(0);
+        @error_reporting(E_ALL);
+        @ini_set("display_errors", 0);
+        @ini_set('memory_limit', '512M');
 
-            if($mode === null)
+        if($mode !== null)
+        {
+            $this->_mode = strtolower(trim($mode));
+        }else{
+            throw new Exception("please provide syncd run mode as second argument");
+        }
+        if($options !== null)
+        {
+            foreach($options as $o)
             {
-                $this->_mode = $mode = self::MODE_TEST;
-            }else{
-                $this->_mode = strtolower(trim($mode));
+                if(substr($o, 0, 1) === '-')
+                {
+                    $o = trim($o, " -");
+                    if(strpos($o, '=') !== false)
+                    {
+                        $this->_options[strtolower(substr($o, 0, strpos($o, '=')))] = substr($o, strpos($o, '=') + 1, strlen($o));
+                    }else{
+                        $this->_options[strtolower($o)] = null;
+                    }
+                }
             }
-            if(strtolower(trim(php_sapi_name())) !== 'cli')
-            {
-                echo "script can only be called from command line (cli)";
-                exit(0);
-            }
-            if(!defined("DIRECTORY_SEPARATOR"))
-            {
-                define('DIRECTORY_SEPARATOR', ((isset($_ENV["OS"]) && stristr('win',$_ENV["OS"]) !== false) ? '\\' : '/'));
-            }
-            if(!(bool)ini_get('allow_url_fopen'))
-            {
-                throw new Exception("system does not support open (s)ftp protocol wrapper");
-            }
-            if(!class_exists('RecursiveDirectoryIterator', false))
-            {
-                throw new Exception("system does not support recursive iterators");
-            }
-            if(!function_exists('json_encode'))
-            {
-                throw new Exception('system does not support json encode/decode functions');
-            }
-            if(stristr($xml, DIRECTORY_SEPARATOR) === false || (substr($xml, 0, 1) === DIRECTORY_SEPARATOR &&  substr_count($xml, DIRECTORY_SEPARATOR) === 1))
-            {
-                $this->_xml = $xml = rtrim(realpath(dirname(__FILE__)), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($xml, DIRECTORY_SEPARATOR);
-            }else{
-                $this->_xml = $xml;
-            }
-            $this->_xmlArray = $this->xmlToArray($this->_xml);
+        }
+        if(strtolower(trim(php_sapi_name())) !== 'cli')
+        {
+            echo "script can only be called from command line (cli)";
+            exit(0);
+        }
+        if(!defined("DIRECTORY_SEPARATOR"))
+        {
+            define('DIRECTORY_SEPARATOR', ((isset($_ENV["OS"]) && stristr('win',$_ENV["OS"]) !== false) ? '\\' : '/'));
+        }
+        if(!(bool)ini_get('allow_url_fopen'))
+        {
+            throw new Exception("system does not support open (s)ftp protocol wrapper");
+        }
+        if(!class_exists('RecursiveDirectoryIterator', false))
+        {
+            throw new Exception("system does not support recursive iterators");
+        }
+        if(!class_exists('DOMDocument'))
+        {
+            throw new Exception('system does not support dom document functions');
+        }
+        if(stristr($xml, DIRECTORY_SEPARATOR) === false || (substr($xml, 0, 1) === DIRECTORY_SEPARATOR &&  substr_count($xml, DIRECTORY_SEPARATOR) === 1))
+        {
+            $this->_xml = $xml = rtrim(realpath(dirname(__FILE__)), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($xml, DIRECTORY_SEPARATOR);
+        }else{
+            $this->_xml = $xml;
+        }
+        $doc = new DOMDocument();
+        if($doc->load($this->_xml, LIBXML_NOBLANKS | LIBXML_NOCDATA))
+        {
+            $this->_xmlArray = array_shift($this->xmlToArray($doc));
             $this->init();
             $this->exec();
+        }else{
+            throw new Exception("xml config file: $xml not found or invalid");
         }
     }
 
@@ -260,15 +298,16 @@ class Syncd
     /**
      * @desc singleton run method to shortcut run syncd
      * @static
-     * @param string|null $xml expects absolute or relative path to config xml
+     * @param string $xml expects absolute or relative path to config xml
      * @param string $mode expects the run mode
+     * @param array $options expects optional options array
      * @return null|Syncd
      */
-    public static function run($xml = null, $mode = self::MODE_TEST)
+    public static function run($xml, $mode, Array $options = null)
     {
         if(self::$_instance === null)
         {
-            self::$_instance = new self($xml, $mode);
+            self::$_instance = new self($xml, $mode, $options);
         }
         return self::$_instance;
     }
@@ -331,10 +370,7 @@ class Syncd
                 throw new Exception("job.log file could not be opened");
             }
         }
-        if($this->_mode === self::MODE_LIVE)
-        {
-            $this->initJobs();
-        }
+        $this->initJobs();
         $this->initConfig();
     }
 
@@ -358,71 +394,94 @@ class Syncd
             $j = 0;
             foreach($xml['jobs']['job'] as $k => &$v)
             {
+                if(isset($v['actions']['action']) && !isset($v['actions']['action'][0]))
+                {
+                    $v['actions']['action'] = array($v['actions']['action']);
+                }
                 if(!$this->is("jobs.job.$j.@attributes.id"))
                 {
                     $v['@attributes']['id'] = $j;
                 }
+                //validate actions
+                if(isset($v['actions']))
+                {
+                    foreach($v['actions']['action'] as $r)
+                    {
+                        if(!array_key_exists('@attributes', $r) || !array_key_exists('type', $r['@attributes']))
+                        {
+                            throw new Exception("job entry must contain a valid attribute for jobs.job.actions.action.@attribute.type");
+                        }
+                        if(!in_array($r['@attributes']['type'], array('delete')))
+                        {
+                            throw new Exception("job entry must contain a valid attribute for jobs.job.actions.action.@attribute.type");
+                        }
+                    }
+                }
+                //validate date
                 if($this->is("jobs.job.$j.@attributes.date"))
                 {
-                    if($this->is("jobs.job.$j.@attributes.type"))
+                    if(!array_key_exists('force', $this->_options))
                     {
-                        $type = strtolower(trim($this->get("jobs.job.$j.@attributes.type")));
-                    }else{
-                        $type = $v['@attributes']['type'] = 'once';
-                    }
-                    $date = trim($this->get("jobs.job.$j.@attributes.date"));
-                    $id = trim($this->get("jobs.job.$j.@attributes.id"));
+                        if($this->is("jobs.job.$j.@attributes.type"))
+                        {
+                            $type = strtolower(trim($this->get("jobs.job.$j.@attributes.type")));
+                        }else{
+                            $type = $v['@attributes']['type'] = 'once';
+                        }
+                        $date = trim($this->get("jobs.job.$j.@attributes.date"));
+                        $id = trim($this->get("jobs.job.$j.@attributes.id"));
 
-                    if(!in_array($type, array('once', 'daily')))
-                    {
-                        throw new Exception("config file must define a supported attribute value for config.jobs.job.@attributes.type");
-                    }
-                    if(empty($date))
-                    {
-                        throw new Exception("config file must define a supported attribute value for config.jobs.job.@attributes.date");
-                    }
-                    if(strlen($id) < 1)
-                    {
-                        throw new Exception("config file must define a supported attribute value for config.jobs.job.@attributes.id");
-                    }
-                    switch($type)
-                    {
-                        case 'once':
-                            if(($date = strtotime($date)) !== false)
-                            {
-                                if(time() >= $date)
+                        if(!in_array($type, array('once', 'daily')))
+                        {
+                            throw new Exception("job entry must contain a valid attribute for jobs.job.@attributes.type");
+                        }
+                        if(empty($date))
+                        {
+                            throw new Exception("job entry must contain a valid attribute for jobs.job.@attributes.date");
+                        }
+                        if(strlen($id) < 1)
+                        {
+                            throw new Exception("job entry must contain a valid attribute for jobs.job.@attributes.id");
+                        }
+                        switch($type)
+                        {
+                            case 'once':
+                                if(($date = strtotime($date)) !== false)
                                 {
-                                    if($this->_jobPool !== null && isset($this->_jobPool[basename($this->_xml)][$id]))
+                                    if(time() >= $date)
                                     {
+                                        if($this->_jobPool !== null && isset($this->_jobPool[basename($this->_xml)][$id]))
+                                        {
+                                            $v = null;
+                                        }
+                                    }else{
                                         $v = null;
                                     }
                                 }else{
-                                    $v = null;
+                                    throw new Exception("job attribute value for jobs.job.@attributes.date is not a valid date value");
                                 }
-                            }else{
-                                throw new Exception("job attribute value for config.jobs.job.@attributes.date is not a valid date value");
-                            }
-                            break;
-                        case 'daily':
-                            if((bool)preg_match('/([0-9]{1,2})\:([0-9]{1,2})$/i', $date, $m) !== false)
-                            {
-                                if(time() < mktime((int)$m[1], (int)$m[2], (int)strftime('%S', time()), (int)strftime('%m', time()), (int)strftime('%d', time()), (int)strftime('%Y', time())))
+                                break;
+                            case 'daily':
+                                if((bool)preg_match('/([0-9]{1,2})\:([0-9]{1,2})$/i', $date, $m) !== false)
                                 {
-                                    $v = null;
-                                }
-                                if($this->_jobPool !== null && isset($this->_jobPool[basename($this->_xml)][$id]))
-                                {
-                                    $time = (int)trim($this->_jobPool[basename($this->_xml)][$id][sizeof($this->_jobPool[basename($this->_xml)][$id]) - 1]);
-                                    if(time() > mktime((int)strftime('%H', $time), (int)strftime('%M', $time), (int)strftime('%S', $time), (int)strftime('%m', time()), (int)strftime('%d', time()), (int)strftime('%Y', time())))
+                                    if(time() < mktime((int)$m[1], (int)$m[2], (int)strftime('%S', time()), (int)strftime('%m', time()), (int)strftime('%d', time()), (int)strftime('%Y', time())))
                                     {
                                         $v = null;
                                     }
+                                    if($this->_jobPool !== null && isset($this->_jobPool[basename($this->_xml)][$id]))
+                                    {
+                                        $time = (int)trim($this->_jobPool[basename($this->_xml)][$id][sizeof($this->_jobPool[basename($this->_xml)][$id]) - 1]);
+                                        if(time() > mktime((int)strftime('%H', $time), (int)strftime('%M', $time), (int)strftime('%S', $time), (int)strftime('%m', time()), (int)strftime('%d', time()), (int)strftime('%Y', time())))
+                                        {
+                                            $v = null;
+                                        }
+                                    }
+                                }else{
+                                    throw new Exception("job attribute value for jobs.job.@attributes.date is not a valid hourly value");
                                 }
-                            }else{
-                                throw new Exception("job attribute value for config.jobs.job.@attributes.date is not a valid hourly value");
-                            }
-                            break;
-                        default:
+                                break;
+                            default:
+                        }
                     }
                 }
                 $j++;
@@ -562,7 +621,6 @@ class Syncd
                         $exclude = array($exclude);
                     }
                 }
-
                 $this->log("..using compare mode: $compare", self::LOG_NOTICE);
                 $this->log("..using resync option: " . (($resync) ? "yes" : "no"), self::LOG_NOTICE);
                 $this->log("..using skip rules: $skip", self::LOG_NOTICE);
@@ -611,7 +669,7 @@ class Syncd
                 }else{
                     $this->_conn->setCwd();
                 }
-                $target = trim($v['target'], DIRECTORY_SEPARATOR."*") . DIRECTORY_SEPARATOR;
+                $target = DIRECTORY_SEPARATOR . trim($v['target'], DIRECTORY_SEPARATOR."*") . DIRECTORY_SEPARATOR;
                 $this->log("...validating target dir: $target", self::LOG_NOTICE);
 
                 if(!$this->_conn->testDir($target))
@@ -620,6 +678,38 @@ class Syncd
                 }
 
                 $skip = explode(",", str_replace(array(";", ".", "*"), array(",", "", ""), $skip));
+
+                //prepare actions
+                $actions = false;
+                if($this->is("jobs.job.$j.actions.action"))
+                {
+                    $actions = array();
+                    foreach($v['actions']['action'] as &$a)
+                    {
+                        $a['@value'] = trim($a['@value'], ' *');
+                        if(preg_match('/\.([a-z0-9]{2,})$/i', $a['@value']))
+                        {
+                            if(stristr($a['@value'], $target))
+                            {
+                                $p = DIRECTORY_SEPARATOR . ltrim($a['@value'], DIRECTORY_SEPARATOR);
+                                $r = "#^" . addslashes(DIRECTORY_SEPARATOR . ltrim($a['@value'], DIRECTORY_SEPARATOR)) . "$#i";
+                            }else{
+                                $p = $target . ltrim($a['@value'], DIRECTORY_SEPARATOR);
+                                $r = "#^" . addslashes($target . ltrim($a['@value'], DIRECTORY_SEPARATOR)) . "$#i";
+                            }
+                        }else{
+                            if(stristr($a['@value'], $target))
+                            {
+                                $p = DIRECTORY_SEPARATOR . trim($a['@value'], DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+                                $r = "#^" . addslashes(DIRECTORY_SEPARATOR  . trim($a['@value'], DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR) . ".*#i";
+                            }else{
+                                $p = $target . trim($a['@value'], DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+                                $r = "#^" . addslashes($target . trim($a['@value'], DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR) . ".*#i";
+                            }
+                        }
+                        $actions[md5($p)] = array($a['@attributes']['type'], $r, $p);
+                    }
+                }
 
                 //prepare modified since value
                 if(!empty($modified_since))
@@ -672,9 +762,8 @@ class Syncd
                     unset($ex);
                 }
 
-                $iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($source), RecursiveIteratorIterator::SELF_FIRST);
-
                 //iterate to source directories and sync
+                $iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($source), RecursiveIteratorIterator::SELF_FIRST);
                 foreach($iterator as $i)
                 {
                     $source_absolute_path   = ($i->isDir()) ? rtrim($i->__toString(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR : $i->__toString();
@@ -756,7 +845,7 @@ class Syncd
                             $this->log("...file: $source_absolute_path is skipped from sync because of skip rule in place", self::LOG_NOTICE);
                             continue;
                         }
-                        if($this->_conn->isFile($target_absolute_path) && !empty($compare))
+                        if($this->_conn->isFile($target_absolute_path))
                         {
                             if($compare === "time")
                             {
@@ -807,6 +896,25 @@ class Syncd
                                 }else{
                                     $this->log("...file: $source_absolute_path already exists on target server at: $target_absolute_path and will NOT be overwritten since file size has NOT changed", self::LOG_NOTICE);
                                 }
+                            }else{
+                                $this->log("...file: $source_absolute_path already exists on target server and will be overwritten without comparing", self::LOG_NOTICE);
+                                if($this->_mode === self::MODE_LIVE)
+                                {
+                                    if($this->_conn->copy($source_absolute_path, $target_absolute_path, $source_permission_num))
+                                    {
+                                        $this->log("....file: $source_absolute_path OK", self::LOG_SUCCESS);
+                                    }else{
+                                        $this->log("....file: $source_absolute_path FAILED", self::LOG_ERROR);
+                                    }
+                                    if(!empty($chown))
+                                    {
+                                        $this->_conn->chOwn($target_absolute_path, $chown);
+                                    }
+                                    if(!empty($chgrp))
+                                    {
+                                        $this->_conn->chGrp($target_absolute_path, $chgrp);
+                                    }
+                                }
                             }
                         }else{
                             $this->log("...file: $source_absolute_path does not exists on target server and will be copied", self::LOG_NOTICE);
@@ -854,6 +962,62 @@ class Syncd
                     @clearstatcache();
                 }
 
+                //iterate to target directories and apply actions if exist
+                if($actions)
+                {
+                    $this->log("..applying additional actions for target directory", self::LOG_NOTICE);
+                    if(($iterator = $this->_conn->lsDir($target)) !== false)
+                    {
+                        foreach($iterator as $i)
+                        {
+                            $i = DIRECTORY_SEPARATOR . ltrim($i, DIRECTORY_SEPARATOR);
+                            $i = (is_dir($i)) ? rtrim($i, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR : $i;
+                            foreach($actions as $a)
+                            {
+                                if(preg_match($a[1], $i))
+                                {
+                                    $this->log("...target file/dir: $i has been detected matching additional action: " . $a[0], self::LOG_NOTICE);
+                                    if($this->_mode === self::MODE_LIVE)
+                                    {
+                                        switch($a[0])
+                                        {
+                                            case 'delete':
+                                                $type = $this->_conn->fileType($i);
+                                                if($type !== false)
+                                                {
+                                                    if($type === "dir")
+                                                    {
+                                                        if($this->_conn->rmDir($i))
+                                                        {
+                                                            $this->log("....dir: $i deleted OK", self::LOG_SUCCESS);
+                                                        }else{
+                                                            $this->log("....dir: $i deleted FAILED", self::LOG_ERROR);
+                                                        }
+                                                    }else{
+                                                        if($this->_conn->rmFile($i))
+                                                        {
+                                                            $this->log("....file: $i deleted OK", self::LOG_SUCCESS);
+                                                        }else{
+                                                            $this->log("....file: $i deleted FAILED", self::LOG_ERROR);
+                                                        }
+                                                    }
+                                                }
+                                                break;
+                                            default:
+                                                $this->log("...additional action type: ".$a[0]." is not valid - skipping action", self::LOG_ERROR);
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }else{
+                        $this->log("..dir: $target could not be opened for additional actions", self::LOG_ERROR);
+                    }
+                    @clearstatcache();
+                }
+
+                //resync to find orphaned files
                 if($resync)
                 {
                     $this->log("..searching for orphaned files/dirs", self::LOG_NOTICE);
@@ -949,7 +1113,7 @@ class Syncd
         {
             $keys = explode(".", strtolower(trim($key)));
             $xml =& $this->_xmlArray;
-            $res = eval("return \$xml['".implode("']['", $keys)."'];");
+            $res = @eval("return \$xml['".implode("']['", $keys)."'];");
             if($res !== null && !empty($res))
             {
                 return $res;
@@ -1043,33 +1207,67 @@ class Syncd
 
 
     /**
-     * @desc convert xml file or string into array using json functions
-     * @param string $xml expects xml file pointer or xml string
+     * @desc translates DOM xml structure/object into array
+     * @param DOMNode|null $node expects the root/child node to recursive transform childs into array
      * @return array
-     * @throws Exception
      */
-    protected function xmlToArray($xml)
+    protected function xmlToArray(DOMNode $node = null)
     {
-        libxml_use_internal_errors(true);
+        $result = array();
+        $group = array();
+        $attributes = null;
+        $children = null;
 
-        if(is_file($xml))
+        if($node->hasAttributes())
         {
-            $xml = simplexml_load_file($xml, 'SimpleXMLElement', LIBXML_NOBLANKS | LIBXML_NOCDATA);
-        }else{
-            $xml = simplexml_load_string((string)$xml, 'SimpleXMLElement', LIBXML_NOBLANKS | LIBXML_NOCDATA);
-        }
-        if($xml !== false)
-        {
-            return json_decode(json_encode($xml), true);
-        }else{
-            $error = libxml_get_errors();
-            if(isset($error[0]))
+            $attributes = $node->attributes;
+            foreach($attributes as $k => $v)
             {
-                throw new Exception("xml error: " . $error[0]['message']);
-            }else{
-                throw new Exception("unknown xml error - possible invalid xml file or string");
+                $result['@attributes'][$v->name] = $v->value;
             }
         }
+
+        $children = $node->childNodes;
+
+        if(!empty($children))
+        {
+            if((int)$children->length === 1)
+            {
+                $child = $children->item(0);
+
+                if($child !== null && $child->nodeType === XML_TEXT_NODE)
+                {
+                    $result['@value'] = $child->nodeValue;
+                    if(count($result) == 1)
+                    {
+                        return $result['@value'];
+                    }else{
+                        return $result;
+                    }
+                }
+            }
+
+            for($i = 0; $i < (int)$children->length; $i++)
+            {
+                $child = $children->item($i);
+
+                if($child !== null)
+                {
+                    if(!isset($result[$child->nodeName]))
+                    {
+                        $result[$child->nodeName] = $this->xmlToArray($child);
+                    }else{
+                        if(!isset($group[$child->nodeName]))
+                        {
+                            $result[$child->nodeName] = array($result[$child->nodeName]);
+                            $group[$child->nodeName] = 1;
+                        }
+                        $result[$child->nodeName][] = $this->xmlToArray($child);
+                    }
+                }
+            }
+        }
+        return $result;
     }
 
 
@@ -1652,7 +1850,7 @@ class Sftp extends Ft
 
     /**
      * @param null $dir
-     * @return void
+     * @return mixed
      */
     public function lsDir($dir = null)
     {
@@ -1660,31 +1858,34 @@ class Sftp extends Ft
 
         if($dir !== null)
         {
-            function _lsDir($b = null, $d = null, Array &$tmp = array())
+            if(!function_exists('_lsDir'))
             {
-                $b = rtrim($b, DIRECTORY_SEPARATOR);
-                $d = DIRECTORY_SEPARATOR . trim($d, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
-
-                if(is_dir($b . $d) && ($h = @opendir($b . $d)) !== false)
+                function _lsDir($b = null, $d = null, Array &$tmp = array())
                 {
-                    while(($f = readdir($h)) !== false)
+                    $b = rtrim($b, DIRECTORY_SEPARATOR);
+                    $d = DIRECTORY_SEPARATOR . trim($d, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+
+                    if(is_dir($b . $d) && ($h = @opendir($b . $d)) !== false)
                     {
-                        $f = ltrim($f, DIRECTORY_SEPARATOR);
-                        if(substr($f, 0, 1) !== "." && substr($f, 0, 2) !== "..")
+                        while(($f = readdir($h)) !== false)
                         {
-                            $tmp[] = $d . $f;
-                            if(is_dir($b . $d . $f))
+                            $f = ltrim($f, DIRECTORY_SEPARATOR);
+                            if(substr($f, 0, 1) !== "." && substr($f, 0, 2) !== "..")
                             {
-                                _lsDir($b, $d . $f, $tmp);
+                                $tmp[] = $d . $f;
+                                if(is_dir($b . $d . $f))
+                                {
+                                    _lsDir($b, $d . $f, $tmp);
+                                }
                             }
                         }
+                        @closedir($h);
+                    }else{
+                        return false;
                     }
-                    @closedir($h);
-                }else{
-                    return false;
+                    @clearstatcache();
+                    return array_reverse($tmp);
                 }
-                @clearstatcache();
-                return array_reverse($tmp);
             }
 
             $base = "ssh2.sftp://".$this->_sftp . rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
@@ -1702,40 +1903,45 @@ class Sftp extends Ft
 
     /**
      * @param null $dir
-     * @return void
+     * @return mixed
      */
     public function rmDir($dir = null)
     {
+        $e = false;
+
         if($dir !== null)
         {
             $dir = "ssh2.sftp://".$this->_sftp . rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR);
 
-            function _rmDir($d = null, &$e)
+            if(!function_exists('_rmDir'))
             {
-                if($d !== null)
+                function _rmDir($d = null, &$e)
                 {
-                    $d = rtrim($d, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
-                    if(is_dir($d) && ($files = @scandir($d)) !== false)
+                    if($d !== null)
                     {
-                        foreach($files as $f)
+                        $d = rtrim($d, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+                        if(is_dir($d) && ($files = @scandir($d)) !== false)
                         {
-                            if(substr($f, 0, 1) !== "." && substr($f, 0, 2) !== "..")
+                            foreach($files as $f)
                             {
-                                if(is_dir($d . $f))
+                                if(substr($f, 0, 1) !== "." && substr($f, 0, 2) !== "..")
                                 {
-                                    _rmDir($d . $f, $e);
-                                }else{
-                                    if(!@unlink($d . $f))
+                                    if(is_dir($d . $f))
                                     {
-                                       Ft::error("unable to delete file: $d . $f", "error"); $e = true;
+                                        _rmDir($d . $f, $e);
+                                    }else{
+                                        if(!@unlink($d . $f))
+                                        {
+                                           Ft::error("unable to delete file: $d . $f", "error"); $e = true;
+                                        }
                                     }
                                 }
                             }
-                        }
-                        @reset($files);
-                        if(!@rmdir($d))
-                        {
-                            Ft::error("unable to delete dir: $d", "error"); $e = true;
+                            @reset($files);
+                            if(!@rmdir($d))
+                            {
+                                Ft::error("unable to delete dir: $d", "error"); $e = true;
+                            }
                         }
                     }
                 }
@@ -1754,7 +1960,7 @@ class Sftp extends Ft
 
     /**
      * @param null $file
-     * @return void
+     * @return bool
      */
     public function rmFile($file = null)
     {
@@ -2118,7 +2324,7 @@ class Fs extends FT
 
     /**
      * @param null $dir
-     * @return void
+     * @return mixed
      */
     public function lsDir($dir = null)
     {
@@ -2126,31 +2332,34 @@ class Fs extends FT
 
         if($dir !== null)
         {
-            function _lsDir($b = null, $d = null, Array &$tmp = array())
+            if(!function_exists('_lsDir'))
             {
-                $b = rtrim($b, DIRECTORY_SEPARATOR);
-                $d = DIRECTORY_SEPARATOR . trim($d, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
-
-                if(is_dir($b . $d) && ($h = @opendir($b . $d)) !== false)
+                function _lsDir($b = null, $d = null, Array &$tmp = array())
                 {
-                    while(($f = readdir($h)) !== false)
+                    $b = rtrim($b, DIRECTORY_SEPARATOR);
+                    $d = DIRECTORY_SEPARATOR . trim($d, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+
+                    if(is_dir($b . $d) && ($h = @opendir($b . $d)) !== false)
                     {
-                        $f = ltrim($f, DIRECTORY_SEPARATOR);
-                        if(substr($f, 0, 1) !== "." && substr($f, 0, 2) !== "..")
+                        while(($f = readdir($h)) !== false)
                         {
-                            $tmp[] = $d . $f;
-                            if(is_dir($b . $d . $f))
+                            $f = ltrim($f, DIRECTORY_SEPARATOR);
+                            if(substr($f, 0, 1) !== "." && substr($f, 0, 2) !== "..")
                             {
-                                _lsDir($b, $d . $f, $tmp);
+                                $tmp[] = $d . $f;
+                                if(is_dir($b . $d . $f))
+                                {
+                                    _lsDir($b, $d . $f, $tmp);
+                                }
                             }
                         }
+                        @closedir($h);
+                    }else{
+                        return false;
                     }
-                    @closedir($h);
-                }else{
-                    return false;
+                    @clearstatcache();
+                    return array_reverse($tmp);
                 }
-                @clearstatcache();
-                return array_reverse($tmp);
             }
 
             $base = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
@@ -2168,7 +2377,7 @@ class Fs extends FT
 
     /**
      * @param null $dir
-     * @return void
+     * @return bool
      */
     public function rmDir($dir = null)
     {
@@ -2178,32 +2387,35 @@ class Fs extends FT
         {
             $dir = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR);
 
-            function _rmDir($d = null, &$e)
+            if(!function_exists('_rmDir'))
             {
-                if($d !== null)
+                function _rmDir($d = null, &$e)
                 {
-                    $d = rtrim($d, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
-                    if(is_dir($d) && ($files = @scandir($d)) !== false)
+                    if($d !== null)
                     {
-                        foreach($files as $f)
+                        $d = rtrim($d, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+                        if(is_dir($d) && ($files = @scandir($d)) !== false)
                         {
-                            if(substr($f, 0, 1) !== "." && substr($f, 0, 2) !== "..")
+                            foreach($files as $f)
                             {
-                                if(is_dir($d . $f))
+                                if(substr($f, 0, 1) !== "." && substr($f, 0, 2) !== "..")
                                 {
-                                    _rmDir($d . $f, $e);
-                                }else{
-                                    if(!@unlink($d . $f))
+                                    if(is_dir($d . $f))
                                     {
-                                       Ft::error("unable to delete file: $d . $f", "error"); $e = true;
+                                        _rmDir($d . $f, $e);
+                                    }else{
+                                        if(!@unlink($d . $f))
+                                        {
+                                           Ft::error("unable to delete file: $d . $f", "error"); $e = true;
+                                        }
                                     }
                                 }
                             }
-                        }
-                        @reset($files);
-                        if(!@rmdir($d))
-                        {
-                            Ft::error("unable to delete dir: $d", "error"); $e = true;
+                            @reset($files);
+                            if(!@rmdir($d))
+                            {
+                                Ft::error("unable to delete dir: $d", "error"); $e = true;
+                            }
                         }
                     }
                 }
@@ -2223,7 +2435,7 @@ class Fs extends FT
 
     /**
      * @param null $file
-     * @return void
+     * @return bool
      */
     public function rmFile($file = null)
     {
@@ -2269,15 +2481,15 @@ class Fs extends FT
  * run script via cli
  * 
 *************************************************************************************/
-if((int)$argc >= 2)
+if(isset($argv) && (int)$argc >= 2)
 {
     try
     {
-        Syncd::run($argv[1], (isset($argv[2])) ? $argv[2] : null);
+        Syncd::run($argv[1], (isset($argv[2])) ? $argv[2] : null, (isset($argv[3])) ? array_slice($argv, 3) : null);
     }
     catch(Exception $e)
     {
-        echo "\033[01;31m".$e->getMessage()."\033[0m\n";
+        echo "\033[01;31m" . $e->getMessage() . ", " . $e->getCode() . ", " . $e->getLine()."\033[0m\n";
     }
 }
 
