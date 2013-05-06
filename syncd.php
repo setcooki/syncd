@@ -4,9 +4,10 @@
  * TODO: make a real is writeable test in test modus
  * TODO: make ftp client
  * TODO: follow symbolic links
- * TODO: rework/improve sftp:exec
+ * TODO: rework/improve sftp::exec
  * TODO: ssh user on shared server must not have full path in all action in target path. define xml node to use target root path or not
  * TODO: copy file must be a stream write procedure since copy/fopen are asyncron operations and there is no way of determining the eof event to set chmod after file has been copied
+ * TODO: delete log files in cleanup older then x days
  */
 
 /**
@@ -194,7 +195,7 @@
  * @copyright Copyright &copy; 2011-2012 setcookie
  * @license http://www.gnu.org/copyleft/gpl.html
  * @package syncd
- * @version 0.0.9
+ * @version 0.1.0
  * @desc base class for sync
  * @throws Exception
  */
@@ -323,6 +324,8 @@ class Syncd
     {
         $tmp = array();
 
+        $this->log("starting sync", self::LOG_NOTICE);
+
         $xml =& $this->_xmlArray;
 
         if(isset($xml['config']['logdir']))
@@ -403,6 +406,10 @@ class Syncd
                 {
                     $v['@attributes']['id'] = $j;
                 }
+
+                $id = $v['@attributes']['id'];
+                $this->log(".validating job: $j with id: $id", self::LOG_NOTICE);
+
                 //validate actions
                 if(isset($v['actions']))
                 {
@@ -454,9 +461,11 @@ class Syncd
                                         if($this->_jobPool !== null && isset($this->_jobPool[basename($this->_xml)][$id]))
                                         {
                                             $v = null;
+                                            $this->log("..job has been scheduled to run once and has already been executed", self::LOG_NOTICE);
                                         }
                                     }else{
                                         $v = null;
+                                        $this->log("..job has been scheduled to run once but can not be executed before schedule date", self::LOG_NOTICE);
                                     }
                                 }else{
                                     throw new Exception("job attribute value for jobs.job.@attributes.date is not a valid date value");
@@ -468,6 +477,7 @@ class Syncd
                                     if(time() < mktime((int)$m[1], (int)$m[2], (int)strftime('%S', time()), (int)strftime('%m', time()), (int)strftime('%d', time()), (int)strftime('%Y', time())))
                                     {
                                         $v = null;
+                                        $this->log("..job has been scheduled to run daily but can not be executed before schedule date", self::LOG_NOTICE);
                                     }
                                     if($this->_jobPool !== null && isset($this->_jobPool[basename($this->_xml)][$id]))
                                     {
@@ -475,6 +485,7 @@ class Syncd
                                         if(time() > mktime((int)strftime('%H', $time), (int)strftime('%M', $time), (int)strftime('%S', $time), (int)strftime('%m', time()), (int)strftime('%d', time()), (int)strftime('%Y', time())))
                                         {
                                             $v = null;
+                                            $this->log("..job has been scheduled to run daily and has already been executed", self::LOG_NOTICE);
                                         }
                                     }
                                 }else{
@@ -527,7 +538,7 @@ class Syncd
                     {
                         $xml['config']['target']['pass'] = $pass;
                     }else{
-                        die("Please run script again an enter correct password");
+                        echo "Please run script again an enter correct password";
                         exit(0);
                     }
                 }
@@ -566,8 +577,6 @@ class Syncd
         {
             throw new Exception("there is nothing to sync");
         }
-        
-        $this->log("starting sync", self::LOG_NOTICE);
 
         $j = 0;
 
@@ -577,6 +586,7 @@ class Syncd
             {
                 $id = $v['@attributes']['id'];
                 $this->log(".executing job: $j with id: $id", self::LOG_NOTICE);
+
                 $resync = (bool)$this->get("config.resync", false);
                 if($this->is("jobs.job.$j.@attributes.resync"))
                 {
