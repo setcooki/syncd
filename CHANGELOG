@@ -1,0 +1,57 @@
+May 7, 2013 1:45 PM
+Version 0.1.1
+-----------------------------------------------
+- refactor of run modes now 4 modes "test", "test-logged", "live", "live-logged"
+- run mode is a mandatory argument now
+- bug fixes for jobs.log that when in test mode run times where written to log file
+- optimized logging output
+- refactored error/exception handling so that exceptions are also logged once log file is set
+- refactored log report entry details now containing also datetime of entry
+- fixed nothing to sync bug when multiple jobs
+
+May 6, 2013 9:31 AM
+Version 0.1.0
+-----------------------------------------------
+- optimized logging output for scheduled jobs
+
+May 3, 2013 7:05 PM
+Version 0.0.9
+-----------------------------------------------
+- added new option -silent
+- added human readable datetime in jobs.log file
+- minor fixes
+
+May 3, 2013 12:20 PM
+Version 0.0.8
+-----------------------------------------------
+- minor bug fixes
+
+May 2, 2013 11:47 AM
+Version 0.0.7
+-----------------------------------------------
+- replaced xml to array function
+- fixed multiple job bug
+
+November 20, 2012 3:35 PM
+Version 0.0.6
+-----------------------------------------------
+- log file directory can now be set in config file.
+- (cron) automated jobs can be set which are called once, daily ...
+- minor improvements
+
+November 19, 2012 16:20 PM
+Version 0.0.5
+-----------------------------------------------
+- adding .svn folder/files detection support
+
+August 9, 2012 1:59 PM
+Version 0.0.4
+-----------------------------------------------
+- Implemented chown/chgrp for SFTP
+- Completed documentation
+- General improvements
+
+August 8, 2012 9:50 AM
+Version 0.0.3
+-----------------------------------------------
+- Added chgrp/chown option
