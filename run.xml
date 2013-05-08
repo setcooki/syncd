@@ -5,6 +5,7 @@
         <resync>1</resync>
         <skip>*.svn,*.git,*.log</skip>
         <logdir>/logs</logdir>
+        <logclean>30</logclean>
     </config>
     <jobs>
         <job id="j1" type="once" date="2013-05-03 13:00:00">

@@ -64,6 +64,7 @@
         <chown>www-data</chown>
         <chgrp>www-data</chgrp>
         <logdir>/logs</logdir>
+        <logclean>30</logclean>
     </config>
     <jobs>
         <job id="job1" compare="size" resync="1" type="daily" date="00:00">
@@ -137,6 +138,9 @@
  * 14) config.logdir (optional)
  * expects absolute or relative path to log file directory, the directory where log files are written to. relative must be from the location of base syncd.php file.
  *
+ * 15) config.logclean (optional)
+ * if set and an integer value of x days will delete all report log files older then that value in days
+ *
  * The following parameters must/can be defined in job nodes as attribute:
  *
  * 1) id
@@ -196,7 +200,7 @@
  * @copyright Copyright &copy; 2011-2012 setcookie
  * @license http://www.gnu.org/copyleft/gpl.html
  * @package syncd
- * @version 0.1.1
+ * @version 0.1.2
  * @desc base class for sync
  * @throws Exception
  */
@@ -352,6 +356,23 @@ class Syncd
 
         $this->_jobFile = $this->_logDir . 'jobs.log';
         $this->_logFile = $this->_logDir . basename($this->_xml, ".xml") . "-". strftime("%Y%m%d-%H%M%S", time()) . ".report.log";
+
+        if(isset($xml['config']['logclean']) && (int)$xml['config']['logclean'] > 0)
+        {
+            if(($dir = glob($this->_logDir . '*.log')) !== false)
+            {
+                foreach($dir as $d)
+                {
+                    if(preg_match('/([0-9]{8})\-([0-9]{6})\.report\.log$/i', $d, $match))
+                    {
+                        if(mktime(0, 0, 0, (int)substr($match[0], 4, 2), (int)substr($match[0], 6, 2), (int)substr($match[0], 0, 4)) < time() - ((int)$xml['config']['logclean'] * 86400))
+                        {
+                            @unlink($d);
+                        }
+                    }
+                }
+            }
+        }
 
         if(is_file($this->_jobFile))
         {
