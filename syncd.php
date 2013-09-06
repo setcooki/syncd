@@ -4,10 +4,8 @@
  * TODO: make a real is writeable test in test modus
  * TODO: make ftp client
  * TODO: follow symbolic links
- * TODO: rework/improve sftp::exec
  * TODO: ssh user on shared server must not have full path in all action in target path. define xml node to use target root path or not
  * TODO: copy file must be a stream write procedure since copy/fopen are asyncron operations and there is no way of determining the eof event to set chmod after file has been copied
- * TODO: delete log files in cleanup older then x days
  */
 
 /**
@@ -48,11 +46,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <root>
     <config>
+        <ini>
+            <memory_limit>512mb</memory_limit>
+        </ini>
         (<target>
             <host>xx.xx.xx.xx</host>
             <port>22</port>
             <user>root</user>
             <pass></pass>
+            <class include="/var/www/syncd/seclib:Net/SFTP.php">Seclib</class>
         </target>)
         <sourcebase></sourcebase>
         <targetbase></targetbase>
@@ -65,6 +67,7 @@
         <chgrp>www-data</chgrp>
         <logdir>/logs</logdir>
         <logclean>30</logclean>
+        <profile>1</profile>
     </config>
     <jobs>
         <job id="job1" compare="size" resync="1" type="daily" date="00:00">
@@ -83,6 +86,7 @@
         </job>
     </jobs>
 </root>
+ * The optional ini node can be used to set ini key => values for php
  *
  * The config parameters are the following:
  *
@@ -102,44 +106,51 @@
  * 4) config.target.pass (optional)
  * expects the ssh user password (if not set will asked for in shell)
  *
- * 5) config.sourcebase (optional)
+ * 5) config.target.class (optional)
+ * expects the optional class to force use, e.g. Sftp. the class node can also have attributes for using external classes:
+ * - includes - for a ":" separated string of include paths or include files
+ *
+ * 6) config.sourcebase (optional)
  * expects the source root/base path. if set the job source path must be relative because basepath + jobpath
  *
- * 6) config.targetbase (optional)
+ * 7) config.targetbase (optional)
  * expects the target root/base path. if set the job target path must be relative because basepath + jobpath
  * the targetbase path also set the current working directory on the target server. if not set the app will look for the cwd
  * automatically using the unix pwd command.
  * NOTE: on shared hosts the pwd command still will return the correct path from root but ftp/sftp can only write to relative path.
  * in this case the targetbase path should be set like "/" forcing the cwd to the path of the logged in user (relative)
  *
- * 7) config.compare (optional)
+ * 8) config.compare (optional)
  * if set expects a compare modus (size|date) which will compare files and sync only if rule does not apply
  *
- * 8) config.resync (optional)
+ * 9) config.resync (optional)
  * expects a value (0 = off|1 = on) if the process should also delete orphaned files on target remote server
  *
- * 9) config.skip (optional)
+ * 10) config.skip (optional)
  * expects optional skip rules which is a comma separated list of file extensions
  *
- * 10) config.modified_since (optional)
+ * 11) config.modified_since (optional)
  * if set syncs only files which are newer then modification date
  *
- * 11) config.chmod (optional)
+ * 12) config.chmod (optional)
  * expects a chmod value to set to remote file once syncd to remote server
  *
- * 12) config.chown (optional)
+ * 13) config.chown (optional)
  * expects a username as string to set after copy of file/dir has been successful. the username will be tested before sync to check if username does exist on target server.
  * the new username will only be set if the to be copied source file/dir does have a different user as owner
  *
- * 13) config.chgrp (optional)
+ * 14) config.chgrp (optional)
  * expects a group name as string to set after copy of file/dir has been successful. the group will be tested before sync to check if group does exist on target server.
  * the new group name will only be set if the to be copied source file/dir does have a different user as owner
  *
- * 14) config.logdir (optional)
+ * 15) config.logdir (optional)
  * expects absolute or relative path to log file directory, the directory where log files are written to. relative must be from the location of base syncd.php file.
  *
- * 15) config.logclean (optional)
+ * 16) config.logclean (optional)
  * if set and an integer value of x days will delete all report log files older then that value in days
+ *
+ * 17) config.profile (optional)
+ * if set to 1 will use profiling (time, cpu, ram) and write profiling values to log file
  *
  * The following parameters must/can be defined in job nodes as attribute:
  *
@@ -214,9 +225,11 @@ class Syncd
     const LOG_SUCCESS           = "success";
     const LOG_ERROR             = "error";
     const LOG_EXCEPTION         = "exception";
+    protected                   $_start = null;
     protected                   $_xml = null;
     protected                   $_dir = null;
     protected                   $_mode = null;
+    protected                   $_profile = false;
     protected                   $_options = array();
     protected                   $_xmlArray = null;
     protected                   $_conn = null;
@@ -238,9 +251,11 @@ class Syncd
      */
     public function __construct($xml, $mode, Array $options = null)
     {
+        $this->_start = microtime(true);
+
         @set_time_limit(0);
         @error_reporting(E_ALL);
-        @ini_set("display_errors", 0);
+        @ini_set("display_errors", 1);
         @ini_set('memory_limit', '512M');
 
         $mode = strtolower(trim((string)$mode));
@@ -295,7 +310,8 @@ class Syncd
         $doc = new DOMDocument();
         if($doc->load($this->_xml, LIBXML_NOBLANKS | LIBXML_NOCDATA))
         {
-            $this->_xmlArray = array_shift($this->xmlToArray($doc));
+            $this->_xmlArray = $this->xmlToArray($doc);
+            $this->_xmlArray = array_shift($this->_xmlArray);
             $this->init();
             $this->exec();
         }else{
@@ -332,6 +348,19 @@ class Syncd
         $tmp = array();
 
         $xml =& $this->_xmlArray;
+
+        if(isset($xml['ini']))
+        {
+            foreach((array)$xml['ini'] as $k => $v)
+            {
+                @ini_set($k, $v);
+            }
+        }
+
+        if(isset($xml['config']['profile']) && (int)$xml['config']['profile'] === 1)
+        {
+            $this->_profile = true;
+        }
 
         if(isset($xml['config']['logdir']))
         {
@@ -580,7 +609,34 @@ class Syncd
                 }
                 if(isset($xml['config']['target']))
                 {
-                    $class = ((int)$xml['config']['target']['port'] === 21 || strtolower(trim($xml['config']['target']['port'])) === "ftp") ? "Ftp" : "Sftp";
+                    if(isset($xml['config']['target']['class']) && !empty($xml['config']['target']['class']))
+                    {
+                        if(is_array($xml['config']['target']['class']))
+                        {
+                            if(isset($xml['config']['target']['class']['@attributes']) && isset($xml['config']['target']['class']['@attributes']['includes']))
+                            {
+                                $includes = explode(':', trim($xml['config']['target']['class']['@attributes']['includes']));
+                                foreach($includes as $i)
+                                {
+                                    if(strpos($i, '.') !== false)
+                                    {
+                                        include_once(trim($i));
+                                    }else{
+                                        if(!set_include_path(get_include_path() . PATH_SEPARATOR . trim($i)))
+                                        {
+                                            echo "unable to set include path: $i";
+                                            exit(0);
+                                        }
+                                    }
+                                }
+                            }
+                            $class = strtolower(trim($xml['config']['target']['class']['@value']));
+                        }else{
+                            $class = strtolower(trim($xml['config']['target']['class']));
+                        }
+                    }else{
+                        $class = ((int)$xml['config']['target']['port'] === 21 || strtolower(trim($xml['config']['target']['port'])) === "ftp") ? "Ftp" : "Sftp";
+                    }
                     $this->_conn = new $class($this);
                     $this->_conn->init
                     (
@@ -839,9 +895,17 @@ class Syncd
                         {
                             if(!empty($chown))
                             {
-                                if(strtolower(trim($owner['name'])) === strtolower(trim((string)$chown)))
+                                if($this->_conn instanceof Seclib)
                                 {
-                                    $chown = "";
+                                    if((int)$owner['uid'] === (int)$chown)
+                                    {
+                                        $chown = "";
+                                    }
+                                }else{
+                                    if(strtolower(trim($owner['name'])) === strtolower(trim((string)$chown)))
+                                    {
+                                        $chown = "";
+                                    }
                                 }
                             }
                         }else{
@@ -855,9 +919,17 @@ class Syncd
                         {
                             if(!empty($chgrp))
                             {
-                                if(strtolower(trim($group['name'])) === strtolower(trim((string)$chgrp)))
+                                if($this->_conn instanceof Seclib)
                                 {
-                                    $chgrp = "";
+                                    if((int)$group['gid'] === (int)$chgrp)
+                                    {
+                                        $chgrp = "";
+                                    }
+                                }else{
+                                    if(strtolower(trim($group['name'])) === strtolower(trim((string)$chgrp)))
+                                    {
+                                        $chgrp = "";
+                                    }
                                 }
                             }
                         }else{
@@ -1146,7 +1218,7 @@ class Syncd
     protected function get($key = null, $default = "")
     {
         $val = null;
-        
+
         if(($val = $this->is($key)) !== false)
         {
             return $val;
@@ -1192,7 +1264,12 @@ class Syncd
         }
         foreach((array)$mixed as $m)
         {
-            $this->_log[] = array(time(), (string)$m, (string)$level);
+            if($this->_profile)
+            {
+                $this->_log[] = array(time(), number_format(round(microtime(true) - $this->_start, 2), 2, '.', ''), memory_get_usage(false), (string)$m, (string)$level);
+            }else{
+                $this->_log[] = array(time(), (string)$m, (string)$level);
+            }
         }
         if($level === self::LOG_EXCEPTION)
         {
@@ -1372,7 +1449,12 @@ class Syncd
                 $txt = "Sync report for: ".$this->_xml." on: ". strftime("%Y-%m-%d %H:%M:%S", time())."\r\n";
                 foreach($this->_log as $log)
                 {
-                    $txt .= strftime("%Y-%m-%d %H:%M:%S", $log[0]). ", " . strtoupper($log[2]).", " . $log[1] . "\n";
+                    if($this->_profile)
+                    {
+                        $txt .= strftime("%Y-%m-%d %H:%M:%S", $log[0]). ", ". $log[1] .", " . $log[2] . ", " . strtoupper($log[4]).", " . $log[3] . "\n";
+                    }else{
+                        $txt .= strftime("%Y-%m-%d %H:%M:%S", $log[0]). ", " . strtoupper($log[2]).", " . $log[1] . "\n";
+                    }
                 }
                 @file_put_contents($this->_logFile, $txt);
             }
@@ -1445,6 +1527,7 @@ abstract class Ft
      * @desc initializes base class
      * @param null|Syncd $syncd expects the syncd instance as parent workflow container
      * @public
+     * @throws Exception
      */
     public function __construct(Syncd $syncd = null)
     {
@@ -1550,27 +1633,406 @@ abstract class Ft
 * @license http://www.gnu.org/copyleft/gpl.html
 * @package syncd
 * @since 0.0.1
-* @desc concrete implementation of ftp protocol
+* @desc concrete implementation for external phpseclib class
 */
-class Ftp extends Ft
+class Seclib extends Ft
 {
-    public function connect(){}
-    public function testDir($dir = null){}
-    public function isDir($dir = null){}
-    public function isFile($file = null){}
-    public function fileTime($file = null, $m = "m"){}
-    public function fileSize($file = null){}
-    public function copy($source = null, $target = null, $mode = null){}
-    public function mkDir($dir = null){}
-    public function lsDir($dir = null){}
-    public function rmDir($dir = null){}
-    public function rmFile($file = null){}
-    public function fileType($file = null){}
-    public function setCwd($cwd = null){}
-    public function chOwn($file = null, $user = null){}
-    public function chGrp($file = null, $group = null){}
-    public function isOwn($user = null){}
-    public function isGrp($group = null){}
+    /**
+     * @var null
+     */
+    public $_sftp = null;
+
+    /**
+     * @throws Exception
+     */
+    public function connect()
+    {
+        $this->_sftp = new Net_SFTP($this->_host, $this->_port);
+        if(!$this->_sftp->login($this->_user, $this->_pass))
+        {
+            throw new Exception("unable to authenticate to sftp connection");
+        }
+    }
+
+    /**
+     * @param null $dir
+     * @return bool
+     */
+    public function testDir($dir = null)
+    {
+        if($this->isDir($dir))
+        {
+            $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR) . ".tmp";
+            if($this->_sftp->put($file, "") !== false)
+            {
+                $this->_sftp->delete($file);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @param null $dir
+     * @return bool
+     */
+    public function isDir($dir = null)
+    {
+        if($dir !== null)
+        {
+            $dir = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR);
+            if($this->_sftp->nlist($dir) !== false)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @param null $file
+     * @return bool
+     */
+    public function isFile($file = null)
+    {
+        if($file !== null)
+        {
+            $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
+            if($this->_sftp->size($file) !== false)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @param null $file
+     * @param string $m
+     * @return int
+     */
+    public function fileTime($file = null, $m = "m")
+    {
+        if($file !== null)
+        {
+            $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
+            if(($stat = $this->_sftp->stat($file)) !== false)
+            {
+                switch(strtolower(trim((string)$m)))
+                {
+                    case "a":
+                        return (int)$stat['atime'];
+                    default:
+                        return (int)$stat['mtime'];
+                }
+            }else{
+                $this->error("unable to obtain file stats from: $file");
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * @param null $file
+     * @return int
+     */
+    public function fileSize($file = null)
+    {
+        if($file !== null)
+        {
+            $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
+            if(($size = $this->_sftp->size($file)) !== false)
+            {
+                return (int)$size;
+            }else{
+                $this->error("unable to obtain filesize from: $file");
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * @param null $source
+     * @param null $target
+     * @param null $mode
+     * @return bool
+     */
+    public function copy($source = null, $target = null, $mode = null)
+    {
+        $return = false;
+
+        if($source !== null && $target !== null)
+        {
+            if($this->_cwd === "/"){
+                $target = $this->_cwd . ltrim((string)$target, DIRECTORY_SEPARATOR);
+            }else{
+                $target = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$target, DIRECTORY_SEPARATOR);
+            }
+            if($mode !== null)
+            {
+                $return = $this->_sftp->put($target, $source, NET_SFTP_LOCAL_FILE);
+                if($return !== false)
+                {
+                    $return = $this->_sftp->chmod($mode, $target, false);
+                }
+            }else{
+                $return = $this->_sftp->put($target, $source, NET_SFTP_LOCAL_FILE);
+            }
+            if(!$return)
+            {
+                $this->error("unable to scp copy file: $source to: $target");
+            }
+        }
+        @clearstatcache();
+        return $return;
+    }
+
+    /**
+     * @param null $dir
+     * @param int $mode
+     * @return bool
+     */
+    public function mkDir($dir = null, $mode = 0775)
+    {
+        if($dir !== null)
+        {
+            $dir = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR);
+            if($this->_sftp->mkdir($dir, $mode))
+            {
+                return true;
+            }else{
+                $this->error("unable to create dir: $dir with permissions: $mode");
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @param null $dir
+     * @return array|bool
+     */
+    public function lsDir($dir = null)
+    {
+        $ls = false;
+
+        if($dir !== null)
+        {
+            if(!function_exists('_lsDir'))
+            {
+                function _lsDir($b = null, $d = null, &$t,  Array &$tmp = array())
+                {
+                    $b = rtrim($b, DIRECTORY_SEPARATOR);
+                    $d = DIRECTORY_SEPARATOR . trim($d, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+
+                    if($t->isDir($b . $d))
+                    {
+                        foreach((array)$t->_sftp->nlist($b . $d) as $f)
+                        {
+                            $f = ltrim($f, DIRECTORY_SEPARATOR);
+                            if(substr($f, 0, 1) !== "." && substr($f, 0, 2) !== "..")
+                            {
+                                $tmp[] = $d . $f;
+                                if($t->isDir($b . $d . $f))
+                                {
+                                    _lsDir($b, $d . $f, $t, $tmp);
+                                }
+                            }
+                        }
+                    }else{
+                        return false;
+                    }
+                    @clearstatcache();
+                    return array_reverse($tmp);
+                }
+            }
+
+            $base = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+            $dir = ltrim((string)$dir, DIRECTORY_SEPARATOR);
+
+            if(($ls = _lsDir($base, $dir, $this)) !== false)
+            {
+                return $ls;
+            }else{
+                $this->error("unable to list dir: $base . $dir");
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @param null $dir
+     * @return bool
+     */
+    public function rmDir($dir = null)
+    {
+        if($dir !== null)
+        {
+            $dir = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR);
+            if($this->_sftp->delete($dir, true) !== false)
+            {
+                return true;
+            }else{
+                $this->error("unable to delete dir: $dir");
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @param null $file
+     * @return bool
+     */
+    public function rmFile($file = null)
+    {
+        if($file !== null)
+        {
+            $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
+            if(!$this->_sftp->delete($file, false))
+            {
+                if($this->_sftp->chmod(0777, $file, false) !== false && $this->_sftp->delete($file, false) !== false)
+                {
+                    return true;
+                }
+                $this->error("unable to delete file: $file");
+            }else{
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @param null $file
+     * @return bool|string
+     */
+    public function fileType($file = null)
+    {
+        if($file !== null)
+        {
+            $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
+            if(($stat = $this->_sftp->stat($file)) !== false)
+            {
+                switch((int)$stat['type'])
+                {
+                    case 1:
+                        return 'file';
+                    case 2:
+                        return 'dir';
+                    default:
+                        return false;
+                }
+            }else{
+                $this->error("unable to obtain file type from: $file");
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @param null $cwd
+     * @return string
+     * @throws Exception
+     */
+    public function setCwd($cwd = null)
+    {
+        if($cwd !== null)
+        {
+            $this->_cwd = trim((string)$cwd);
+        }else{
+            if($this->_cwd === "")
+            {
+                if(($pwd = $this->_sftp->pwd()) !== false)
+                {
+                    $this->_cwd = rtrim($pwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+                }else{
+                    throw new Exception("unable to obtain current working directory from stream");
+                }
+            }
+        }
+        return $this->_cwd;
+    }
+
+    /**
+     * @param null $file
+     * @param null $user
+     * @return bool
+     */
+    public function chOwn($file = null, $user = null)
+    {
+        if($file !== null && $user !== null)
+        {
+            if($this->_cwd === "/"){
+                $file = $this->_cwd . ltrim((string)$file, DIRECTORY_SEPARATOR);
+            }else{
+                $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
+            }
+            if($this->_sftp->chown($file, (int)$user) !== false)
+            {
+                return true;
+            }else{
+                $this->error("unable to chown file: $file to: $user");
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @param null $file
+     * @param null $group
+     * @return bool
+     */
+    public function chGrp($file = null, $group = null)
+    {
+        if($file !== null && $group !== null)
+        {
+            if($this->_cwd === "/"){
+                $file = $this->_cwd . ltrim((string)$file, DIRECTORY_SEPARATOR);
+            }else{
+                $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
+            }
+            if($this->_sftp->chgrp($file, (int)$group) !== false)
+            {
+                return true;
+            }else{
+                $this->error("unable to chgrp file: $file to: $group");
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @param null $user
+     * @return bool
+     */
+    public function isOwn($user = null)
+    {
+        if($user !== null)
+        {
+            $return = $this->_sftp->exec("sudo grep \":".(int)$user."\" /etc/passwd | cut -d \":\" -f 3");
+            if(!empty($return))
+            {
+                return ((int)trim($return) === (int)$user) ? true : false;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @param null $group
+     * @return bool
+     */
+    public function isGrp($group = null)
+    {
+        if($group !== null)
+        {
+            $return = $this->_sftp->exec("sudo grep \":".(int)$group."\" /etc/group | cut -d \":\" -f 3");
+            if(!empty($return))
+            {
+                return ((int)trim($return) === (int)$group) ? true : false;
+            }
+        }
+        return false;
+    }
 }
 
 /**
@@ -1606,7 +2068,6 @@ class Sftp extends Ft
         }
     }
 
-
     /**
      * @throws Exception
      * @param null $cwd
@@ -1640,18 +2101,16 @@ class Sftp extends Ft
      */
     public function testDir($dir = null)
     {
-        $return = false;
         if($this->isDir($dir))
         {
             $file = "ssh2.sftp://".$this->_sftp . rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR) . ".tmp";
             if((bool)@file_put_contents($file, " "))
             {
                 @unlink($file);
-                $return = true;
+                return true;
             }
         }
-        @clearstatcache();
-        return $return;
+        return false;
     }
 
 
@@ -1661,17 +2120,15 @@ class Sftp extends Ft
      */
     public function isDir($dir = null)
     {
-        $return = false;
         if($dir !== null)
         {
             $dir = "ssh2.sftp://".$this->_sftp . rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR);
             if(is_dir($dir))
             {
-                $return = true;
+                return true;
             }
         }
-        @clearstatcache();
-        return $return;
+        return false;
     }
 
     /**
@@ -1680,17 +2137,15 @@ class Sftp extends Ft
      */
     public function isFile($file = null)
     {
-        $return = false;
         if($file !== null)
         {
             $file = "ssh2.sftp://".$this->_sftp . rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
             if(is_file($file))
             {
-                $return = true;
+                return true;
             }
         }
-        @clearstatcache();
-        return $return;
+        return false;
     }
 
     /**
@@ -1702,7 +2157,6 @@ class Sftp extends Ft
     {
         if($file !== null)
         {
-            $t = 0;
             $file = "ssh2.sftp://".$this->_sftp . rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
             $m = strtolower(trim((string)$m));
             switch($m)
@@ -1735,7 +2189,6 @@ class Sftp extends Ft
     {
         if($file !== null)
         {
-            $s = 0;
             $file = "ssh2.sftp://".$this->_sftp . rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
             if(($s = filesize($file)) !== false)
             {
@@ -1808,6 +2261,7 @@ class Sftp extends Ft
     /**
      * @param null $file
      * @param null $group
+     * @return bool
      */
     public function chGrp($file = null, $group = null)
     {
@@ -1837,7 +2291,7 @@ class Sftp extends Ft
     {
         if($user !== null)
         {
-            $return = $this->exec("sudo grep ".trim((string)$user)." /etc/passwd");
+            $return = $this->exec("sudo grep \"^".trim((string)$user).":\" /etc/passwd");
             if(!empty($return))
             {
                 return true;
@@ -1854,7 +2308,7 @@ class Sftp extends Ft
     {
         if($group !== null)
         {
-            $return = $this->exec("sudo grep ".trim((string)$group)." /etc/group");
+            $return = $this->exec("sudo grep \"^".trim((string)$group).":\" /etc/group");
             if(!empty($return))
             {
                 return true;
@@ -1870,19 +2324,17 @@ class Sftp extends Ft
      */
     public function mkDir($dir = null, $mode = 0775)
     {
-        $return = false;
         if($dir !== null)
         {
             $dir = "ssh2.sftp://".$this->_sftp . rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR);
             if(@mkdir($dir, $mode))
             {
-                $return = true;
+                return true;
             }else{
                 $this->error("unable to create dir: $dir with permissions: $mode");
             }
         }
-        @clearstatcache();
-        return $return;
+        return false;
     }
 
     /**
@@ -1993,6 +2445,7 @@ class Sftp extends Ft
                 $this->error("unable to delete dir: $dir");
             }
         }
+        return false;
     }
 
     /**
@@ -2108,18 +2561,16 @@ class Fs extends FT
      */
     public function testDir($dir = null)
     {
-        $return = false;
         if($this->isDir($dir))
         {
             $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . rtrim((string)$dir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ".tmp";
             if((bool)@file_put_contents($file, " "))
             {
                 @unlink($file);
-                $return = true;
+                return true;
             }
         }
-        @clearstatcache();
-        return $return;
+        return false;
     }
 
     /**
@@ -2128,17 +2579,15 @@ class Fs extends FT
      */
     public function isDir($dir = null)
     {
-        $return = false;
         $dir = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR);
         if($dir !== null)
         {
             if(is_dir($dir))
             {
-                $return = true;
+                return true;
             }
         }
-        @clearstatcache();
-        return $return;
+        return false;
     }
 
     /**
@@ -2147,17 +2596,15 @@ class Fs extends FT
      */
     public function isFile($file = null)
     {
-        $return = false;
         $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
         if($file !== null)
         {
             if(is_file($file))
             {
-                $return = true;
+                return true;
             }
         }
-        @clearstatcache();
-        return $return;
+        return false;
     }
 
     /**
@@ -2169,7 +2616,6 @@ class Fs extends FT
     {
         if($file !== null)
         {
-            $t = 0;
             $m = strtolower(trim((string)$m));
             $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
             switch($m)
@@ -2202,7 +2648,6 @@ class Fs extends FT
     {
         if($file !== null)
         {
-            $s = 0;
             $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
             if(($s = filesize($file)) !== false)
             {
@@ -2222,7 +2667,6 @@ class Fs extends FT
      */
     public function copy($source = null, $target = null, $mode = null)
     {
-        $mask = 0;
         $return = false;
 
         if($source !== null && $target !== null)
@@ -2263,8 +2707,6 @@ class Fs extends FT
      */
     public function chOwn($file = null, $user = null)
     {
-        $return = false;
-
         if($file !== null && $user !== null)
         {
             if($this->_cwd === "/"){
@@ -2273,13 +2715,14 @@ class Fs extends FT
                 $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
             }
             $return = @chown($file, (string)$user);
-            if(!$return)
+            if($return)
             {
+                return true;
+            }else{
                 $this->error("unable to chown file: $file to: $user");
             }
         }
-        @clearstatcache();
-        return $return;
+        return false;
     }
 
     /**
@@ -2289,8 +2732,6 @@ class Fs extends FT
      */
     public function chGrp($file = null, $group = null)
     {
-        $return = false;
-
         if($file !== null && $group !== null)
         {
             if($this->_cwd === "/"){
@@ -2299,13 +2740,14 @@ class Fs extends FT
                 $file = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$file, DIRECTORY_SEPARATOR);
             }
             $return = @chgrp($file, (string)$group);
-            if(!$return)
+            if($return)
             {
+                return true;
+            }else{
                 $this->error("unable to chgrp file: $file to: $group");
             }
         }
-        @clearstatcache();
-        return $return;
+        return false;
     }
 
     /**
@@ -2342,7 +2784,7 @@ class Fs extends FT
     public function mkDir($dir = null, $mode = 0755)
     {
         $mask = null;
-        $return = false;
+
         if($dir !== null)
         {
             $dir = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR);
@@ -2350,13 +2792,12 @@ class Fs extends FT
             if(@mkdir($dir, $mode))
             {
                 @umask($mask);
-                $return = true;
+                return true;
             }else{
                 $this->error("unable to create dir: $dir with permissions: $mode");
             }
         }
-        @clearstatcache();
-        return $return;
+        return false;
     }
 
     /**
@@ -2516,7 +2957,7 @@ class Fs extends FT
 /*************************************************************************************
  *
  * run script via cli
- * 
+ *
 *************************************************************************************/
 if(isset($argv) && (int)$argc >= 2)
 {

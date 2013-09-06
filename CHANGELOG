@@ -1,3 +1,11 @@
+September 6, 2013 4:50 PM
+Version 0.1.3
+-----------------------------------------------
+- syncd now supporting external libs (phpseclib) to be used with config options "class"
+- run xml now includes ini node to set php ini option in run time
+- added config.profile option to activate ram profiling in log files
+- general cleanup and minor cosmetics
+
 May 7, 2013 1:45 PM
 Version 0.1.2
 -----------------------------------------------
