@@ -1,3 +1,12 @@
+September 12, 2013 19:22 PM
+Version 0.1.4
+-----------------------------------------------
+- Seclib renamed to Phpseclib_Sftp + methods reworked (isGrpg, isOwn)
+- bug fix for compare mode date which did not work
+- bug fix for class attribute includes which was documented as include
+- changed password prompt capturing
+- minor bug fixes and cosmetics
+
 September 6, 2013 4:50 PM
 Version 0.1.3
 -----------------------------------------------

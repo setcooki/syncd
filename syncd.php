@@ -54,7 +54,7 @@
             <port>22</port>
             <user>root</user>
             <pass></pass>
-            <class include="/var/www/syncd/seclib:Net/SFTP.php">Seclib</class>
+            <class includes="/var/www/syncd/seclib:Net/SFTP.php">Phpseclib_SFTP</class>
         </target>)
         <sourcebase></sourcebase>
         <targetbase></targetbase>
@@ -63,8 +63,8 @@
         <skip>*.svn,*.git,*.log</skip>
         <modified_since>10.11.09 15:20:21</modified_since>
         <chmod>0755</chmod>
-        <chown>www-data</chown>
-        <chgrp>www-data</chgrp>
+        <chown>www-data</chown> //numeric value for Phpseclib_Sftp
+        <chgrp>www-data</chgrp> //numeric value for Phpseclib_Sftp
         <logdir>/logs</logdir>
         <logclean>30</logclean>
         <profile>1</profile>
@@ -410,15 +410,21 @@ class Syncd
                 foreach($this->_jobPool as $k => $v)
                 {
                     $t = explode(",", $v);
-                    if(!array_key_exists($t[0], $tmp))
+                    if(!empty($t))
                     {
-                        $tmp[$t[0]] = array();
+                        if(array_key_exists(0, $t) && !array_key_exists($t[0], $tmp))
+                        {
+                            $tmp[$t[0]] = array();
+                        }
+                        if(array_key_exists(1, $t) && !array_key_exists($t[1], $tmp[$t[0]]))
+                        {
+                            $tmp[$t[0]][$t[1]] = array();
+                        }
+                        if(array_key_exists(0, $t) && array_key_exists(1, $t))
+                        {
+                            $tmp[$t[0]][$t[1]][] = $t[2];
+                        }
                     }
-                    if(!array_key_exists($t[1], $tmp[$t[0]]))
-                    {
-                        $tmp[$t[0]][$t[1]] = array();
-                    }
-                    $tmp[$t[0]][$t[1]][] = $t[2];
                 }
                 $this->_jobPool = $tmp;
             }else{
@@ -596,8 +602,7 @@ class Syncd
                     if(!isset($xml['config']['target']['pass']) || empty($xml['config']['target']['pass']))
                     {
                         echo "Password for target: ";
-                        @system('stty -echo');
-                        $pass = trim(fgets(STDIN));
+                        $pass = preg_replace('/\r?\n$/', '', `stty -echo; head -n1 ; stty echo`);
                         if(!empty($pass))
                         {
                             $xml['config']['target']['pass'] = $pass;
@@ -723,6 +728,7 @@ class Syncd
                             $exclude = array($exclude);
                         }
                     }
+                    $this->log("..using class: " . get_class($this->_conn), self::LOG_NOTICE);
                     $this->log("..using compare mode: $compare", self::LOG_NOTICE);
                     $this->log("..using resync option: " . (($resync) ? "yes" : "no"), self::LOG_NOTICE);
                     $this->log("..using skip rules: $skip", self::LOG_NOTICE);
@@ -731,24 +737,6 @@ class Syncd
                     $this->log("..using chgrp value: $chgrp", self::LOG_NOTICE);
                     $this->log("..using modified since value: ".((!empty($modified_since)) ? $modified_since : ""), self::LOG_NOTICE);
                     $this->log("..using time offset value: ".$time_offset, self::LOG_NOTICE);
-
-                    //testing for user
-                    if(!empty($chown))
-                    {
-                        if(!$this->_conn->isOwn($chown))
-                        {
-                            $this->log("....user: $chown does not exist on target server", self::LOG_ERROR, true);
-                        }
-                    }
-
-                    //testing for group
-                    if(!empty($chgrp))
-                    {
-                        if(!$this->_conn->isGrp($chgrp))
-                        {
-                            $this->log("....group: $chgrp does not exist on target server", self::LOG_ERROR, true);
-                        }
-                    }
 
                     //testing source dir
                     $source = rtrim($this->get("config.sourcebase"), DIRECTORY_SEPARATOR."*") . DIRECTORY_SEPARATOR . trim($v['source'], DIRECTORY_SEPARATOR."*") . DIRECTORY_SEPARATOR;
@@ -774,9 +762,28 @@ class Syncd
                     $target = DIRECTORY_SEPARATOR . trim($v['target'], DIRECTORY_SEPARATOR."*") . DIRECTORY_SEPARATOR;
                     $this->log("...validating target dir: $target", self::LOG_NOTICE);
 
+                    //testing remote dir
                     if(!$this->_conn->testDir($target))
                     {
                         $this->log("....dir: $target FAILED (not found or not writeable)", self::LOG_ERROR, true);
+                    }
+
+                    //testing for user
+                    if(!empty($chown))
+                    {
+                        if(!$this->_conn->isOwn($chown, $target))
+                        {
+                            $this->log("....user: $chown does not exist on target server or permissions for chown denied", self::LOG_ERROR, true);
+                        }
+                    }
+
+                    //testing for group
+                    if(!empty($chgrp))
+                    {
+                        if(!$this->_conn->isGrp($chgrp, $target))
+                        {
+                            $this->log("....group: $chgrp does not exist on target server or permissions for chgrp denied", self::LOG_ERROR, true);
+                        }
                     }
 
                     $skip = explode(",", str_replace(array(";", ".", "*"), array(",", "", ""), $skip));
@@ -965,7 +972,7 @@ class Syncd
                             }
                             if($this->_conn->isFile($target_absolute_path))
                             {
-                                if($compare === "time")
+                                if($compare === "date")
                                 {
                                     if((int)$i->getMTime() > $this->_conn->fileTime($target_absolute_path))
                                     {
@@ -1622,8 +1629,8 @@ abstract class Ft
     abstract public function setCwd($cwd = null);
     abstract public function chOwn($file = null, $user = null);
     abstract public function chGrp($file = null, $group = null);
-    abstract public function isOwn($user = null);
-    abstract public function isGrp($group = null);
+    abstract public function isOwn($user = null, $dir = null);
+    abstract public function isGrp($group = null, $dir = null);
 }
 
 /**
@@ -1633,9 +1640,9 @@ abstract class Ft
 * @license http://www.gnu.org/copyleft/gpl.html
 * @package syncd
 * @since 0.0.1
-* @desc concrete implementation for external phpseclib class
+* @desc concrete implementation for external phpseclib sftp protocol class
 */
-class Seclib extends Ft
+class Phpseclib_Sftp extends Ft
 {
     /**
      * @var null
@@ -1824,7 +1831,7 @@ class Seclib extends Ft
                     $b = rtrim($b, DIRECTORY_SEPARATOR);
                     $d = DIRECTORY_SEPARATOR . trim($d, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
 
-                    if($t->isDir($b . $d))
+                    if($t->isDir($d))
                     {
                         foreach((array)$t->_sftp->nlist($b . $d) as $f)
                         {
@@ -1832,7 +1839,7 @@ class Seclib extends Ft
                             if(substr($f, 0, 1) !== "." && substr($f, 0, 2) !== "..")
                             {
                                 $tmp[] = $d . $f;
-                                if($t->isDir($b . $d . $f))
+                                if($t->isDir($d . $f))
                                 {
                                     _lsDir($b, $d . $f, $t, $tmp);
                                 }
@@ -1853,7 +1860,7 @@ class Seclib extends Ft
             {
                 return $ls;
             }else{
-                $this->error("unable to list dir: $base . $dir");
+                $this->error("unable to list dir: " . $base.$dir);
             }
         }
         return false;
@@ -2002,36 +2009,58 @@ class Seclib extends Ft
 
     /**
      * @param null $user
+     * @param null $dir
      * @return bool
      */
-    public function isOwn($user = null)
+    public function isOwn($user = null, $dir = null)
     {
-        if($user !== null)
+        $return = false;
+
+        if($user !== null && $dir !== null)
         {
-            $return = $this->_sftp->exec("sudo grep \":".(int)$user."\" /etc/passwd | cut -d \":\" -f 3");
-            if(!empty($return))
+            if($this->isDir($dir))
             {
-                return ((int)trim($return) === (int)$user) ? true : false;
+                $file1 = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR) . ".tmp";
+                $file2 = DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR) . ".tmp";
+                if($this->_sftp->put($file1, "") !== false)
+                {
+                    if($this->chOwn($file2, $user))
+                    {
+                        $return = true;
+                    }
+                    $this->_sftp->delete($file1);
+                }
             }
         }
-        return false;
+        return $return;
     }
 
     /**
      * @param null $group
+     * @param null $dir
      * @return bool
      */
-    public function isGrp($group = null)
+    public function isGrp($group = null, $dir = null)
     {
-        if($group !== null)
+        $return = false;
+
+        if($group !== null && $dir !== null)
         {
-            $return = $this->_sftp->exec("sudo grep \":".(int)$group."\" /etc/group | cut -d \":\" -f 3");
-            if(!empty($return))
+            if($this->isDir($dir))
             {
-                return ((int)trim($return) === (int)$group) ? true : false;
+                $file1 = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR) . ".tmp";
+                $file2 = DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR) . ".tmp";
+                if($this->_sftp->put($file1, "") !== false)
+                {
+                    if($this->chGrp($file2, $group))
+                    {
+                        $return = true;
+                    }
+                    $this->_sftp->delete($file1);
+                }
             }
         }
-        return false;
+        return $return;
     }
 }
 
@@ -2285,9 +2314,10 @@ class Sftp extends Ft
 
     /**
      * @param null $user
+     * @param null $dir
      * @return bool
      */
-    public function isOwn($user = null)
+    public function isOwn($user = null, $dir = null)
     {
         if($user !== null)
         {
@@ -2302,9 +2332,10 @@ class Sftp extends Ft
 
     /**
      * @param null $group
+     * @param null $dir
      * @return bool
      */
-    public function isGrp($group = null)
+    public function isGrp($group = null, $dir = null)
     {
         if($group !== null)
         {
@@ -2384,7 +2415,7 @@ class Sftp extends Ft
             {
                 return $ls;
             }else{
-                $this->error("unable to list dir: $base . $dir");
+                $this->error("unable to list dir: " . $base.$dir);
             }
         }
         return false;
@@ -2752,9 +2783,10 @@ class Fs extends FT
 
     /**
      * @param null $user
+     * @param null $dir
      * @return bool
      */
-    public function isOwn($user = null)
+    public function isOwn($user = null, $dir = null)
     {
         if($user !== null)
         {
@@ -2765,9 +2797,10 @@ class Fs extends FT
 
     /**
      * @param null $group
+     * @param null $dir
      * @return bool
      */
-    public function isGrp($group = null)
+    public function isGrp($group = null, $dir = null)
     {
         if($group !== null)
         {
@@ -2847,7 +2880,7 @@ class Fs extends FT
             {
                 return $ls;
             }else{
-                $this->error("unable to list dir: $base . $dir");
+                $this->error("unable to list dir: " . $base.$dir);
             }
         }
         return false;
