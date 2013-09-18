@@ -193,10 +193,13 @@
  *
  * 3) job.excludes (optional)
  * defines the exclude rules which can be:
- * - absolute path in source
- * - relative path to job source dir
- * - filename + extension (will exclude all files of the same name in all directories of job source path!)
- * - path + filename # extension will exclude a specific file from job source path (defined relative or absolute)
+ * - absolute path in source or target
+ * - relative path to job source or target dir
+ * - filename + extension (will exclude all files of the same name in all directories of job source/target path!)
+ * - path + filename # extension will exclude a specific file from job source/target path (defined relative or absolute)
+ * excluded can be files/dir from source AND target - syncd will autodetect according to dir where to exclude.
+ * it is advised to always use absolute paths to avoid possible conflicts! in case of target excludes rules use always
+ * absolute path without targetbase. always test your rules before running syncd live
  *
  * 4) job.actions (optional)
  * defines a list of actions applied after sync on target server - currently only type "delete" supported. this option is mend to perform actions
@@ -258,6 +261,12 @@ class Syncd
         @ini_set("display_errors", 1);
         @ini_set('memory_limit', '512M');
 
+        if(!defined("DIRECTORY_SEPARATOR"))
+        {
+            define('DIRECTORY_SEPARATOR', ((isset($_ENV["OS"]) && stristr('win',$_ENV["OS"]) !== false) ? '\\' : '/'));
+        }
+
+        $xml = DIRECTORY_SEPARATOR . ltrim(trim($xml), DIRECTORY_SEPARATOR);
         $mode = strtolower(trim((string)$mode));
         if(in_array($mode, array(self::MODE_LIVE, self::MODE_LIVE_LOGGED, self::MODE_TEST, self::MODE_TEST_LOGGED)))
         {
@@ -297,20 +306,17 @@ class Syncd
         {
             throw new Exception('system does not support dom document functions');
         }
-        if(!defined("DIRECTORY_SEPARATOR"))
-        {
-            define('DIRECTORY_SEPARATOR', ((isset($_ENV["OS"]) && stristr('win',$_ENV["OS"]) !== false) ? '\\' : '/'));
-        }
-        if(stristr($xml, DIRECTORY_SEPARATOR) === false || (substr($xml, 0, 1) === DIRECTORY_SEPARATOR &&  substr_count($xml, DIRECTORY_SEPARATOR) === 1))
+
+        if(stristr($xml, realpath(dirname(__FILE__))) === false)
         {
             $this->_xml = $xml = rtrim(realpath(dirname(__FILE__)), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim($xml, DIRECTORY_SEPARATOR);
         }else{
             $this->_xml = $xml;
         }
-        $doc = new DOMDocument();
-        if($doc->load($this->_xml, LIBXML_NOBLANKS | LIBXML_NOCDATA))
+        $dom = new DOMDocument();
+        if($dom->load($this->_xml, LIBXML_NOBLANKS | LIBXML_NOCDATA))
         {
-            $this->_xmlArray = $this->xmlToArray($doc);
+            $this->_xmlArray = $this->xmlToArray($dom);
             $this->_xmlArray = array_shift($this->_xmlArray);
             $this->init();
             $this->exec();
@@ -740,6 +746,7 @@ class Syncd
 
                     //testing source dir
                     $source = rtrim($this->get("config.sourcebase"), DIRECTORY_SEPARATOR."*") . DIRECTORY_SEPARATOR . trim($v['source'], DIRECTORY_SEPARATOR."*") . DIRECTORY_SEPARATOR;
+                    $source = DIRECTORY_SEPARATOR . ltrim($source, DIRECTORY_SEPARATOR);
                     $this->log("...validating source dir: $source", self::LOG_NOTICE);
                     if(!is_dir($source) && is_readable($source))
                     {
@@ -762,7 +769,7 @@ class Syncd
                     $target = DIRECTORY_SEPARATOR . trim($v['target'], DIRECTORY_SEPARATOR."*") . DIRECTORY_SEPARATOR;
                     $this->log("...validating target dir: $target", self::LOG_NOTICE);
 
-                    //testing remote dir
+                    //testing target dir
                     if(!$this->_conn->testDir($target))
                     {
                         $this->log("....dir: $target FAILED (not found or not writeable)", self::LOG_ERROR, true);
@@ -853,19 +860,25 @@ class Syncd
                     {
                         foreach($exclude as &$ex)
                         {
-                            $ex = trim($ex, "*");
-                            //the exclude rule is a absolute path to directory
+                            $ex = DIRECTORY_SEPARATOR . ltrim(trim($ex, " *"), DIRECTORY_SEPARATOR);
+                            //the exclude rule is a absolute path to a source directory
                             if(@is_dir($ex)){
-                                $ex = "#^" . addslashes(DIRECTORY_SEPARATOR . trim($ex, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR) . ".*#i";
+                                $ex = "#^" . preg_quote(DIRECTORY_SEPARATOR . trim($ex, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR) . ".*#i";
                             //the exclude rule is a relative path to directory
                             }else if(@is_dir($source . ltrim($ex, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR)){
-                                $ex = "#^" . addslashes($source . trim($ex, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR). ".*#i";
-                            //the exclude rule is a file with directory address
-                            }else if(stristr($ex, DIRECTORY_SEPARATOR) !== false){
-                                $ex = "#".addslashes($source . ltrim($ex, DIRECTORY_SEPARATOR))."$#i";
-                            //the exclude rule is a file only
+                                $ex = "#^" . preg_quote($source . trim($ex, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR). ".*#i";
+                            //the exclude rule is a absolute path to a source file
+                            }else if(is_file($ex)){
+                                $ex = "#^" . preg_quote($ex) . "$#i";
+                            //the exclude rule is a relative path to a source file
+                            }else if(is_file($source . ltrim($ex, DIRECTORY_SEPARATOR))){
+                                $ex = "#^" . preg_quote($source . ltrim($ex, DIRECTORY_SEPARATOR)) . "$#i";
+                            //the exclude rule is a dir
+                            }else if(stristr($ex, ((strpos($ex, $source) !== false) ? $source : $target)) !== false && !preg_match('/\.([\w]{2,})$/i', $ex)){
+                                $ex = "#^" . preg_quote($ex). ".*#i";
+                            //the exclude rule is a file
                             }else{
-                                $ex = "#(.*)".addslashes($ex)."$#i";
+                                $ex = "#(.*)" . preg_quote($ex) . "$#i";
                             }
                         }
                         unset($ex);
@@ -902,7 +915,7 @@ class Syncd
                         {
                             if(!empty($chown))
                             {
-                                if($this->_conn instanceof Seclib)
+                                if($this->_conn instanceof Phpseclib_Sftp)
                                 {
                                     if((int)$owner['uid'] === (int)$chown)
                                     {
@@ -926,7 +939,7 @@ class Syncd
                         {
                             if(!empty($chgrp))
                             {
-                                if($this->_conn instanceof Seclib)
+                                if($this->_conn instanceof Phpseclib_Sftp)
                                 {
                                     if((int)$group['gid'] === (int)$chgrp)
                                     {
@@ -1151,6 +1164,17 @@ class Syncd
                             foreach($iterator as $i)
                             {
                                 $_i = DIRECTORY_SEPARATOR . ltrim(str_replace($target, "", $i), DIRECTORY_SEPARATOR);
+                                if($exclude !== null)
+                                {
+                                    foreach($exclude as $ex)
+                                    {
+                                        //skip all files/dir that match exclude rule for target OR source
+                                        if((bool)preg_match($ex, $i) || (bool)preg_match(preg_replace('#'.preg_quote($source).'#i', $target, $ex), $i))
+                                        {
+                                            continue 2;
+                                        }
+                                    }
+                                }
                                 if(!in_array($_i, $tmp))
                                 {
                                     $this->log("...file/dir: $i has been detected as orphaned and will be deleted", self::LOG_NOTICE);

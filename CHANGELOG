@@ -1,3 +1,11 @@
+September 18, 2013 11:10 PM
+Version 0.1.5
+-----------------------------------------------
+- exclude rule optimization now accepts exclude rule for source and target
+- resync bug fixes to target rules are correctly applied
+- Seclib instance of naming error fixed
+- minor bug fixes and cosmetics and documentation update for exclude rules
+
 September 12, 2013 19:22 PM
 Version 0.1.4
 -----------------------------------------------
