@@ -985,14 +985,15 @@ class Syncd
                             continue 1;
                         }
 
+                        $ext = strtolower(str_replace(".", "", trim(substr($source_absolute_path, strrpos($source_absolute_path, ".") + 1))));
+                        if(sizeof($skip_ext) > 0 && (in_array($ext, $skip_ext)) || (bool)preg_match('=.*('.implode('|', $skip_dir).').*=i', $source_absolute_path))
+                        {
+                            $this->log("...file/dir: $source_absolute_path is skipped from sync because of skip rule in place", self::LOG_NOTICE);
+                            continue;
+                        }
+
                         if(!$i->isDir())
                         {
-                            $ext = strtolower(str_replace(".", "", trim(substr($source_absolute_path, strrpos($source_absolute_path, ".") + 1))));
-                            if(sizeof($skip_ext) > 0 && in_array($ext, $skip_ext))
-                            {
-                                $this->log("...file: $source_absolute_path is skipped from sync because of skip rule in place", self::LOG_NOTICE);
-                                continue;
-                            }
                             if($this->_conn->isFile($target_absolute_path))
                             {
                                 if($compare === "date")
@@ -1085,14 +1086,6 @@ class Syncd
                                 }
                             }
                         }else{
-                            if(sizeof($skip_dir) > 0)
-                            {
-                                if((bool)preg_match('=.*('.implode('|', $skip_dir).').*=i', $source_absolute_path))
-                                {
-                                    $this->log("...dir: $source_absolute_path is skipped from sync because of skip rule in place", self::LOG_NOTICE);
-                                    continue;
-                                }
-                            }
                             if(!$this->_conn->isDir($target_absolute_path))
                             {
                                 $this->log("...dir: $target_absolute_path does not exists on target server and will be created", self::LOG_NOTICE);
