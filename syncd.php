@@ -60,7 +60,7 @@
         <targetbase></targetbase>
         <compare>date</compare>
         <resync>1</resync>
-        <skip>*.svn,*.git,*.log</skip>
+        <skip>*.svn*,*.git*,*.log</skip>
         <modified_since>10.11.09 15:20:21</modified_since>
         <chmod>0755</chmod>
         <chown>www-data</chown> //numeric value for Phpseclib_Sftp
@@ -127,7 +127,9 @@
  * expects a value (0 = off|1 = on) if the process should also delete orphaned files on target remote server
  *
  * 10) config.skip (optional)
- * expects optional skip rules which is a comma separated list of file extensions
+ * expects optional skip rules which is a comma separated list of file extensions or paths. file extensions will be identified
+ * by dot e.g. .svn values. path by either *, /, \ as last chars. a skip rule for everything that contains .svn in either extension
+ * or path will be e.g. *.svn*, a file extension only check e.g. *.svn
  *
  * 11) config.modified_since (optional)
  * if set syncs only files which are newer then modification date
@@ -793,7 +795,15 @@ class Syncd
                         }
                     }
 
-                    $skip = explode(",", str_replace(array(";", ".", "*"), array(",", "", ""), $skip));
+                    $skip_dir = array();
+                    $skip_ext = preg_split('/\,+/', str_replace(array(";", ".", "*"), array(",", "", ""), $skip));
+                    foreach(preg_split('/\,+/', $skip) as $s)
+                    {
+                        if(in_array(substr($s, -1), array('*', '/', '\\')))
+                        {
+                            $skip_dir[] = preg_quote(trim($s, '*/\\'));
+                        }
+                    }
 
                     //prepare actions
                     $actions = false;
@@ -978,7 +988,7 @@ class Syncd
                         if(!$i->isDir())
                         {
                             $ext = strtolower(str_replace(".", "", trim(substr($source_absolute_path, strrpos($source_absolute_path, ".") + 1))));
-                            if(sizeof($skip) > 0 && in_array($ext, $skip))
+                            if(sizeof($skip_ext) > 0 && (in_array($ext, $skip_ext)) || (bool)preg_match('=.*('.implode('|', $skip_dir).').*=i', $source_absolute_path))
                             {
                                 $this->log("...file: $source_absolute_path is skipped from sync because of skip rule in place", self::LOG_NOTICE);
                                 continue;
