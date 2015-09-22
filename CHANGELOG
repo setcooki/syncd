@@ -1,3 +1,8 @@
+September 22, 2015: 15:33 PM
+-----------------------------------------------
+- updates Phpseclib_Sftp class to include 'Net/SFTP.php' on instance create since Phpseclib needs to be included as include
+path rather then 'Net/SFTP.php' class in config xml
+
 September 18, 2013 11:10 PM
 Version 0.1.5
 -----------------------------------------------

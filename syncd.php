@@ -1678,6 +1678,7 @@ class Phpseclib_Sftp extends Ft
      */
     public function connect()
     {
+        include_once 'Net/SFTP.php';
         $this->_sftp = new Net_SFTP($this->_host, $this->_port);
         if(!$this->_sftp->login($this->_user, $this->_pass))
         {
