@@ -54,6 +54,10 @@
             <port>22</port>
             <user>root</user>
             <pass></pass>
+            <options>
+                <pubkey>/path/to/public.key</pubkey> //full path to public ssh-rsa key
+                <privkey>/path/to/private.key</privkey> //full path to private ssh-rsa key
+            </options>
             <class includes="/var/www/syncd/seclib:Net/SFTP.php">Phpseclib_SFTP</class>
         </target>)
         <sourcebase></sourcebase>
@@ -106,53 +110,59 @@
  * 4) config.target.pass (optional)
  * expects the ssh user password (if not set will asked for in shell)
  *
- * 5) config.target.class (optional)
+ * 5) config.target.options (optional)
+ * expects key => value pair currently implemented:
+ * - pubkey = full path to public .pub openssh ssh-rsa key
+ * - privkey  = full path to private openssh ssh-rsa key
+ *
+ * 6) config.target.class (optional)
  * expects the optional class to force use, e.g. Sftp. the class node can also have attributes for using external classes:
  * - includes - for a ":" separated string of include paths or include files
  *
- * 6) config.sourcebase (optional)
+ * 7) config.sourcebase (optional)
  * expects the source root/base path. if set the job source path must be relative because basepath + jobpath
  *
- * 7) config.targetbase (optional)
+ * 8) config.targetbase (optional)
  * expects the target root/base path. if set the job target path must be relative because basepath + jobpath
  * the targetbase path also set the current working directory on the target server. if not set the app will look for the cwd
  * automatically using the unix pwd command.
  * NOTE: on shared hosts the pwd command still will return the correct path from root but ftp/sftp can only write to relative path.
  * in this case the targetbase path should be set like "/" forcing the cwd to the path of the logged in user (relative)
  *
- * 8) config.compare (optional)
+ * 9) config.compare (optional)
  * if set expects a compare modus (size|date) which will compare files and sync only if rule does not apply
  *
- * 9) config.resync (optional)
+ * 10) config.resync (optional)
  * expects a value (0 = off|1 = on) if the process should also delete orphaned files on target remote server
  *
- * 10) config.skip (optional)
+ * 11) config.skip (optional)
  * expects optional skip rules which is a comma separated list of file extensions or paths. file extensions will be identified
  * by dot e.g. .svn values. path by either *, /, \ as last chars. a skip rule for everything that contains .svn in either extension
  * or path will be e.g. *.svn*, a file extension only check e.g. *.svn
  *
- * 11) config.modified_since (optional)
+ * 12) config.modified_since (optional)
  * if set syncs only files which are newer then modification date
  *
- * 12) config.chmod (optional)
+ * 13) config.chmod (optional)
  * expects a chmod value to set to remote file once syncd to remote server
  *
- * 13) config.chown (optional)
+ * 14) config.chown (optional)
  * expects a username as string to set after copy of file/dir has been successful. the username will be tested before sync to check if username does exist on target server.
  * the new username will only be set if the to be copied source file/dir does have a different user as owner
  *
- * 14) config.chgrp (optional)
+ * 15) config.chgrp (optional)
  * expects a group name as string to set after copy of file/dir has been successful. the group will be tested before sync to check if group does exist on target server.
  * the new group name will only be set if the to be copied source file/dir does have a different user as owner
  *
- * 15) config.logdir (optional)
+ * 16) config.logdir (optional)
  * expects absolute or relative path to log file directory, the directory where log files are written to. relative must be from the location of base syncd.php file.
  *
- * 16) config.logclean (optional)
+ * 17) config.logclean (optional)
  * if set and an integer value of x days will delete all report log files older then that value in days
  *
- * 17) config.profile (optional)
+ * 18) config.profile (optional)
  * if set to 1 will use profiling (time, cpu, ram) and write profiling values to log file
+ *
  *
  * The following parameters must/can be defined in job nodes as attribute:
  *
@@ -291,6 +301,10 @@ class Syncd
                     }
                 }
             }
+        }
+        if(array_key_exists('silent', $this->_options))
+        {
+            @ini_set("display_errors", 0);
         }
         if(strtolower(trim(php_sapi_name())) !== 'cli')
         {
@@ -607,7 +621,11 @@ class Syncd
                     {
                         $this->log("config file must define config.target.user", self::LOG_EXCEPTION);
                     }
-                    if(!isset($xml['config']['target']['pass']) || empty($xml['config']['target']['pass']))
+                    if(
+                        (!isset($xml['config']['target']['pass']) || empty($xml['config']['target']['pass']))
+                        &&
+                        (!isset($xml['config']['target']['options']['pubkey']))
+                    )
                     {
                         echo "Password for target: ";
                         $pass = preg_replace('/\r?\n$/', '', `stty -echo; head -n1 ; stty echo`);
@@ -650,13 +668,15 @@ class Syncd
                     }else{
                         $class = ((int)$xml['config']['target']['port'] === 21 || strtolower(trim($xml['config']['target']['port'])) === "ftp") ? "Ftp" : "Sftp";
                     }
+
                     $this->_conn = new $class($this);
                     $this->_conn->init
                     (
                         $xml['config']['target']['host'],
                         $xml['config']['target']['port'],
-                        $xml['config']['target']['user'],
-                        $xml['config']['target']['pass']
+                        ((!empty($xml['config']['target']['user'])) ? $xml['config']['target']['user'] : null),
+                        ((!empty($xml['config']['target']['pass'])) ? $xml['config']['target']['pass'] : null),
+                        ((!empty($xml['config']['target']['options'])) ? $xml['config']['target']['options'] : null)
                     );
                     $this->_conn->connect();
                 }else{
@@ -1546,6 +1566,13 @@ abstract class Ft
      */
     protected $_pass = null;
 
+
+    /**
+     * contains connection related connect options see sftp implementations
+     * @var null|array
+     */
+    protected $_options = null;
+
     /**
      * contains all errors in form of error pool
      * @var array $_err
@@ -1585,19 +1612,21 @@ abstract class Ft
      * @desc init default method setting connection settings only used in s(ftp) protocols
      * @param string $host (mandatory) expects the host name string
      * @param int $port (optional) expects the port to connect to host
-     * @param string $user (mandatory) expects the user name for authentication
-     * @param string $pass (mandatory) expects the password for authentication
+     * @param string $user (optional) expects the user name for authentication
+     * @param string $pass (optional) expects the password for authentication
+     * @param array $options (optional) expects connect options
      * @public
      * @return void
      */
-    public function init($host = null, $port = 22, $user = null, $pass = null)
+    public function init($host = null, $port = 22, $user = null, $pass = null, $options = null)
     {
-        if($host !== null && $user !== null && $pass !== null)
+        if($host !== null && $user !== null)
         {
             $this->_host = trim((string)$host);
             $this->_port = (int)$port;
             $this->_user = trim((string)$user);
             $this->_pass = trim((string)$pass);
+            $this->_options = (array)$options;
         }
     }
 
@@ -1689,11 +1718,27 @@ class Phpseclib_Sftp extends Ft
      */
     public function connect()
     {
+        include_once 'Net/SSH2.php';
         include_once 'Net/SFTP.php';
-        $this->_sftp = new Net_SFTP($this->_host, $this->_port);
-        if(!$this->_sftp->login($this->_user, $this->_pass))
+        include_once 'Crypt/RSA.php';
+        include_once 'Crypt/Hash.php';
+        include_once 'Math/BigInteger.php';
+
+        if(!empty($this->_pass))
         {
-            throw new Exception("unable to authenticate to sftp connection");
+            $pass = $this->_pass;
+        }else if(!empty($this->_options) && array_key_exists('pubkey', $this->_options) && array_key_exists('privkey', $this->_options)){
+            $rsa = new Crypt_RSA();
+            $rsa->setPublicKey(file_get_contents($this->_options['pubkey']));
+            $rsa->setPrivateKey(file_get_contents($this->_options['privkey']));
+            $pass = $rsa;
+        }else{
+            throw new Exception("phpseclib sftp login needs either password or key auth");
+        }
+        $this->_sftp = new Net_SFTP($this->_host, $this->_port);
+        if(!$this->_sftp->login($this->_user, $pass))
+        {
+            throw new Exception("unable to authenticate to sftp connection:");
         }
     }
 
@@ -1823,7 +1868,7 @@ class Phpseclib_Sftp extends Ft
             }
             if(!$return)
             {
-                $this->error("unable to scp copy file: $source to: $target");
+                $this->error("unable to sftp copy file: $source to: $target");
             }
         }
         @clearstatcache();
@@ -2111,6 +2156,10 @@ class Phpseclib_Sftp extends Ft
 */
 class Sftp extends Ft
 {
+    /**
+     * sftp connection
+     * @var null
+     */
     protected $_sftp = null;
 
     /**
@@ -2119,13 +2168,32 @@ class Sftp extends Ft
      */
     public function connect()
     {
-        if(!$this->_conn = ssh2_connect($this->_host, $this->_port))
+        $methods = array();
+        if(!empty($this->_options) && array_key_exists('kex', $this->_options))
+        {
+            $methods['kex'] = trim((string)$this->_options['kex']);
+        }
+        if(!empty($this->_options) && array_key_exists('hostkey', $this->_options))
+        {
+            $methods['hostkey'] = trim((string)$this->_options['hostkey']);
+        }
+        if(!$this->_conn = ssh2_connect($this->_host, $this->_port, ((!empty($methods)) ? $methods : null)))
         {
             throw new Exception("unable to obtain ssh connection");
         }
-        if(!ssh2_auth_password($this->_conn, $this->_user, $this->_pass))
+        if(!empty($this->_pass))
         {
-            throw new Exception("unable to authenticate to ssh connection");
+            if(!ssh2_auth_password($this->_conn, $this->_user, $this->_pass))
+            {
+                throw new Exception("unable to auth with password");
+            }
+        }else if(!empty($this->_options) && array_key_exists('pubkey', $this->_options) && array_key_exists('privkey', $this->_options)) {
+            if(!ssh2_auth_pubkey_file($this->_conn, $this->_user, $this->_options['pubkey'], $this->_options['privkey']))
+            {
+                throw new Exception("unable to auth with pubkey file");
+            }
+        }else{
+            throw new Exception("sftp connection requires password or key auth");
         }
         if(!$this->_sftp = ssh2_sftp($this->_conn))
         {

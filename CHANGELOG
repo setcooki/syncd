@@ -1,3 +1,8 @@
+September 24, 2015: 21:43 PM
+version 0.1.7
+-----------------------------------------------
+- implements sftp/Phpseclib_Sftp class ssh-rsa key auth providing public and private key - see update documentation
+
 September 22, 2015: 16:12 PM
 version 0.1.6
 -----------------------------------------------
