@@ -637,6 +637,14 @@ class Syncd
                             exit(0);
                         }
                     }
+                    if(isset($xml['config']['target']['options']['pubkey']) && !is_file($xml['config']['target']['options']['pubkey']))
+                    {
+                        $this->log("pubkey in config.target.options.pubkey not found", self::LOG_EXCEPTION);
+                    }
+                    if(isset($xml['config']['target']['options']['privkey']) && !is_file($xml['config']['target']['options']['privkey']))
+                    {
+                        $this->log("pubkey in config.target.options.privkey not found", self::LOG_EXCEPTION);
+                    }
                 }
                 if(isset($xml['config']['target']))
                 {
