@@ -1,3 +1,9 @@
+Oktober 1, 2015: 15:43 PM
+version 0.1.8
+-----------------------------------------------
+- updates chmod option to not automatically trying to set chmod value from source to target file instead do so only if chmod
+option = "copy"
+
 September 24, 2015: 21:43 PM
 version 0.1.7
 -----------------------------------------------

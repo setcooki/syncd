@@ -144,7 +144,8 @@
  * if set syncs only files which are newer then modification date
  *
  * 13) config.chmod (optional)
- * expects a chmod value to set to remote file once syncd to remote server
+ * expects a chmod value to set to remote file once syncd to remote server. if the value is "copy" will try to copy source permission to target file/dir
+ * NOTE! using "copy" as value should only be used when copied folder/files on target dont inherit permissions via setgid and co
  *
  * 14) config.chown (optional)
  * expects a username as string to set after copy of file/dir has been successful. the username will be tested before sync to check if username does exist on target server.
@@ -637,14 +638,6 @@ class Syncd
                             exit(0);
                         }
                     }
-                    if(isset($xml['config']['target']['options']['pubkey']) && !is_file($xml['config']['target']['options']['pubkey']))
-                    {
-                        $this->log("pubkey in config.target.options.pubkey not found", self::LOG_EXCEPTION);
-                    }
-                    if(isset($xml['config']['target']['options']['privkey']) && !is_file($xml['config']['target']['options']['privkey']))
-                    {
-                        $this->log("pubkey in config.target.options.privkey not found", self::LOG_EXCEPTION);
-                    }
                 }
                 if(isset($xml['config']['target']))
                 {
@@ -932,19 +925,24 @@ class Syncd
                         $tmp[]                  = $source_relative_path;
 
                         //get permissions and convert accordingly
-                        if(($source_permission = @fileperms($source_absolute_path)) !== false)
+                        $source_permission_num = null;
+                        $source_permission_str = null;
+                        if(!empty($chmod))
                         {
-                            if(!empty($chmod))
+                            if(strtolower(trim($chmod) === 'copy'))
                             {
                                 $source_permission_num = octdec((string)(int)$chmod);
                                 $source_permission_str = str_pad(trim($chmod), 4, 0, STR_PAD_LEFT);
                             }else{
-                                $source_permission_num = $this->getMod($source_permission);
-                                $source_permission_str = substr(decoct($source_permission), -4);
+                                if(($source_permission = @fileperms($source_absolute_path)) !== false)
+                                {
+                                    $source_permission_num = $this->getMod($source_permission);
+                                    $source_permission_str = substr(decoct($source_permission), -4);
+                                }else{
+                                    $this->log("...file/dir: $source_absolute_path is skipped because unable to get file permission from source file/dir", self::LOG_ERROR);
+                                    continue 1;
+                                }
                             }
-                        }else{
-                            $this->log("...file/dir: $source_absolute_path is skipped because unable to get file permission from source file/dir", self::LOG_ERROR);
-                            continue 1;
                         }
 
                         //get chown user
@@ -1870,6 +1868,10 @@ class Phpseclib_Sftp extends Ft
                 if($return !== false)
                 {
                     $return = $this->_sftp->chmod($mode, $target, false);
+                    if(!$return)
+                    {
+                        $this->error("successfully copied file: $source to: $target but chmod failed");
+                    }
                 }
             }else{
                 $return = $this->_sftp->put($target, $source, NET_SFTP_LOCAL_FILE);
