@@ -1862,7 +1862,7 @@ class Phpseclib_Sftp extends Ft
             }else{
                 $target = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$target, DIRECTORY_SEPARATOR);
             }
-            if($mode !== null)
+            if(!empty($mode))
             {
                 $return = $this->_sftp->put($target, $source, NET_SFTP_LOCAL_FILE);
                 if($return !== false)
@@ -1895,7 +1895,13 @@ class Phpseclib_Sftp extends Ft
         if($dir !== null)
         {
             $dir = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR);
-            if($this->_sftp->mkdir($dir, $mode))
+            if(!empty($mode))
+            {
+                $return = $this->_sftp->mkdir($dir, $mode);
+            }else{
+                $return = $this->_sftp->mkdir($dir);
+            }
+            if($return)
             {
                 return true;
             }else{
@@ -2472,7 +2478,13 @@ class Sftp extends Ft
         if($dir !== null)
         {
             $dir = "ssh2.sftp://".$this->_sftp . rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR);
-            if(@mkdir($dir, $mode))
+            if(!empty($mode))
+            {
+                $return = @mkdir($dir, $mode);
+            }else{
+                $return = @mkdir($dir);
+            }
+            if($return)
             {
                 return true;
             }else{
@@ -2824,7 +2836,7 @@ class Fs extends FT
             $return = @copy($source, $target);
             if($return)
             {
-                if($mode !== null)
+                if(!empty($mode))
                 {
                     $mask = @umask(0);
                     if(@chmod($target, $mode))
@@ -2936,7 +2948,13 @@ class Fs extends FT
         {
             $dir = rtrim((string)$this->_cwd, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . ltrim((string)$dir, DIRECTORY_SEPARATOR);
             $mask = @umask(0);
-            if(@mkdir($dir, $mode))
+            if(!empty($mode))
+            {
+                $return = @mkdir($dir, $mode);
+            }else{
+                $return = @mkdir($dir);
+            }
+            if($return)
             {
                 @umask($mask);
                 return true;

@@ -1,4 +1,10 @@
-Oktober 1, 2015: 15:43 PM
+October 5, 2015: 21:03 PM
+version 0.1.9
+-----------------------------------------------
+- fixes issues with copy/mkdir with phpseclib where chmod value would be null but passed to phpseclib methods would create
+folders on target server with 0 permissions
+
+October 1, 2015: 15:43 PM
 version 0.1.8
 -----------------------------------------------
 - updates chmod option to not automatically trying to set chmod value from source to target file instead do so only if chmod
